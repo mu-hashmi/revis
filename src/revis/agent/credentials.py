@@ -127,7 +127,7 @@ def daytona_agent_env(*, agent_type: AgentType) -> dict[str, str]:
     if agent_type != AgentType.CODEX:
         raise RevisError("Unsupported agent type.")
     env: dict[str, str] = {}
-    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL"):
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "GH_TOKEN", "GITHUB_TOKEN"):
         value = os.environ.get(name)
         if value:
             env[name] = value

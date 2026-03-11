@@ -20,7 +20,7 @@ def protocol_body(*, objective_text: str, daemon_interval_minutes: int) -> str:
     return f"""# Revis Protocol
 
 You are one of several agents working on the same research objective in parallel.
-Coordinate through the findings ledger and the shared trunk branch.
+Coordinate through the findings ledger and the current promotion target.
 
 ## Workflow
 
@@ -30,7 +30,7 @@ Coordinate through the findings ledger and the shared trunk branch.
    `revis log --kind claim --source "<paper-or-topic>" "I am reading this source now."`
 4. After reading a source, log the result:
    `revis log --kind literature --source "<paper-or-topic>" "factual source summary"`
-5. When you prove an improvement, commit it and run `revis promote`.
+5. When you have a candidate improvement, commit it and run `revis promote`.
 6. Re-read `.revis/latest-findings.md` periodically. Other agents may invalidate your next step.
 7. If `.revis/sync-conflict` exists, resolve the conflict, delete the file, and continue.
 
@@ -80,7 +80,7 @@ NOT ALLOWED:
 ## Automatic Coordination
 
 - `.revis/latest-findings.md` is refreshed about every {daemon_interval_minutes} minutes.
-- Your branch is rebased onto `revis/trunk` on that cadence when the worktree is clean.
+- Your branch is rebased onto the active sync target on that cadence when the worktree is clean.
 - Rebase conflicts are written to `.revis/sync-conflict`.
 
 ## Commands
@@ -106,7 +106,7 @@ def codex_skill_body() -> str:
     """
     return """---
 name: revis
-description: Use the Revis coordination protocol inside a swarm sandbox. Read the shared protocol, consult latest findings, log neutral fact-only findings, and promote proven improvements.
+description: Use the Revis coordination protocol inside a swarm sandbox. Read the shared protocol, consult latest findings, log neutral fact-only findings, and submit candidate improvements.
 ---
 
 # Revis
@@ -121,7 +121,7 @@ When working in a Revis sandbox:
 4. Keep experiment findings to what you ran and what you observed. Keep literature findings to source facts plus at most one neutral relevance sentence.
 5. Do not use evaluative wording such as `improved`, `worsened`, `jumped`, `promising`, or `this suggests`.
 6. Analyze implications only after findings sync through the ledger, never inside the finding that records your own experiment or reading result.
-7. Use `revis promote` only for proven wins on your current branch.
+7. Use `revis promote` when you have a candidate improvement on your current branch.
 8. If `.revis/sync-conflict` exists, resolve it before continuing.
 """
 
@@ -160,5 +160,5 @@ def startup_prompt(*, agent_id: str) -> str:
 
 Use the `revis` skill immediately, then read `.revis/protocol.md` and `.revis/objective.md`.
 
-This sandbox runs Codex. Work autonomously, log neutral fact-only findings, keep implications out of your own result entries, and promote only proven improvements.
+This sandbox runs Codex. Work autonomously, log neutral fact-only findings, keep implications out of your own result entries, and use `revis promote` when you have a candidate improvement.
 """

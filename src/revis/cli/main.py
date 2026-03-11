@@ -13,37 +13,33 @@ from rich.console import Console
 from rich.table import Table
 
 from revis import __version__
-from revis.core.config import CONFIG_PATH, default_codex_template, load_config, save_config
 from revis.agent.credentials import ensure_agent_cli_ready
+from revis.agent.instructions import revis_ignore_patterns
+from revis.cli.monitor import run_monitor
 from revis.coordination.daemon import conflict_path, run_daemon_loop
 from revis.coordination.findings import filter_findings, render_findings
 from revis.coordination.git import (
     FINDINGS_BRANCH,
-    TRUNK_BRANCH,
     bootstrap_remote,
+    branch_head,
+    create_or_reuse_pull_request,
     current_branch,
+    ensure_github_cli_ready,
+    ensure_github_remote,
+    github_repo_name,
     is_git_repo,
     promote_branch,
+    push_branch_for_pr,
     read_findings,
+    remote_branch_exists,
+    remote_url,
     resolve_repo_root,
-    trunk_head,
+    sync_target_branch,
     try_sync_branch,
+    uses_managed_trunk,
     working_tree_dirty,
     write_findings_entry,
 )
-from revis.agent.instructions import revis_ignore_patterns
-from revis.core.models import (
-    AgentRuntimeRecord,
-    AgentState,
-    AgentType,
-    MonitorConfig,
-    ObjectiveConfig,
-    RetentionConfig,
-    RevisConfig,
-    RuntimeRegistry,
-    SandboxProvider,
-)
-from revis.cli.monitor import run_monitor
 from revis.coordination.runtime import (
     append_event,
     append_metric,
@@ -53,10 +49,27 @@ from revis.coordination.runtime import (
     write_agent_record,
     write_registry,
 )
-from revis.sandbox import get_provider
 from revis.coordination.sandbox_meta import load_sandbox_meta
+from revis.core.config import (
+    CONFIG_PATH,
+    default_codex_template,
+    load_config,
+    save_config,
+)
+from revis.core.models import (
+    AgentRuntimeRecord,
+    AgentState,
+    AgentType,
+    FindingEntry,
+    MonitorConfig,
+    ObjectiveConfig,
+    RetentionConfig,
+    RevisConfig,
+    RuntimeRegistry,
+    SandboxProvider,
+)
 from revis.core.util import RevisError, iso_now, sha256_text
-
+from revis.sandbox import get_provider
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
@@ -78,18 +91,24 @@ def init() -> None:
     """Interactively initialize Revis in the current repository."""
     root = Path.cwd()
     if not is_git_repo(root):
-        raise typer.BadParameter("revis init must run inside an existing git repository")
+        raise typer.BadParameter(
+            "revis init must run inside an existing git repository"
+        )
     root = resolve_repo_root(root)
     provider = prompt_provider()
     console.print("Supported coding agents: codex")
     console.print("Default coding agent: codex")
-    objective_value = typer.prompt("Research objective (inline text or path to a markdown file)").strip()
+    objective_value = typer.prompt(
+        "Research objective (inline text or path to a markdown file)"
+    ).strip()
     daemon_interval = typer.prompt("Daemon interval in minutes", default="15").strip()
     objective = parse_objective(root, objective_value)
     branch = current_branch(root)
     remote_name = determine_remote_name(root, provider)
     if provider == SandboxProvider.LOCAL:
-        console.print("[yellow]Local mode creates one full clone per agent and launches agents with full permissions inside those clones.[/yellow]")
+        console.print(
+            "[yellow]Local mode creates one full clone per agent and launches agents with full permissions inside those clones.[/yellow]"
+        )
     else:
         validate_daytona_support()
         console.print(
@@ -98,7 +117,9 @@ def init() -> None:
         )
     validate_agent_launch(AgentType.CODEX, provider, require_daytona_credentials=False)
     if working_tree_dirty(root):
-        console.print("[yellow]Warning:[/yellow] spawn uses committed git state. Uncommitted project changes will not be present in sandboxes.")
+        console.print(
+            "[yellow]Warning:[/yellow] spawn uses committed git state. Uncommitted project changes will not be present in sandboxes."
+        )
 
     config = RevisConfig(
         provider=provider,
@@ -113,8 +134,21 @@ def init() -> None:
     )
     save_config(root, config)
     ensure_gitignore(root)
+    if not uses_managed_trunk(remote_name=remote_name) and not remote_branch_exists(
+        root, remote_name=remote_name, branch=branch
+    ):
+        raise RevisError(
+            f"Remote branch {remote_name}/{branch} does not exist. "
+            f"Push {branch} to {remote_name} before using remote-backed coordination."
+        )
     target_url = configure_coordination_remote(root, provider, remote_name)
-    bootstrap_remote(root, remote_name=remote_name, target_url=target_url, trunk_base_branch=branch)
+    bootstrap_remote(
+        root,
+        remote_name=remote_name,
+        target_url=target_url,
+        trunk_base_branch=branch,
+        manage_trunk=uses_managed_trunk(remote_name=remote_name),
+    )
     console.print(f"Initialized Revis in {root}")
     console.print(f"Provider: {provider.value}")
     console.print(f"Default agent: {AgentType.CODEX.value}")
@@ -148,7 +182,9 @@ def spawn(
     for agent_type, count in counts.items():
         if count <= 0:
             continue
-        validate_agent_launch(agent_type, config.provider, config=config, require_daytona_credentials=True)
+        validate_agent_launch(
+            agent_type, config.provider, config=config, require_daytona_credentials=True
+        )
     registry = load_registry(root)
     if registry is None:
         registry = RuntimeRegistry(
@@ -156,7 +192,9 @@ def spawn(
             provider=config.provider,
             started_at=iso_now(),
             objective_hash=sha256_text(objective_text),
-            trunk_branch=TRUNK_BRANCH,
+            trunk_branch=sync_target_branch(
+                remote_name=config.coordination_remote, base_branch=config.trunk_base
+            ),
             findings_branch=FINDINGS_BRANCH,
             config_path=str(root / CONFIG_PATH),
         )
@@ -181,7 +219,12 @@ def spawn(
             )
             write_agent_record(root, record)
             try:
-                handle = provider.spawn(agent_id=agent_id, agent_type=agent_type, objective_text=objective_text, resume=resume)
+                handle = provider.spawn(
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    objective_text=objective_text,
+                    resume=resume,
+                )
             except Exception as exc:
                 record.state = AgentState.FAILED
                 record.last_error = str(exc)
@@ -191,9 +234,19 @@ def spawn(
             record.sandbox_path_or_id = handle.provider_id or str(handle.root)
             record.attach_cmd = handle.attach_cmd
             record.attach_label = handle.attach_label
-            record.worktree_path = str(handle.root) if config.provider == SandboxProvider.LOCAL else None
-            record.tmux_session = handle.attach_label if config.provider == SandboxProvider.LOCAL else None
-            record.workspace_name = handle.attach_label if config.provider == SandboxProvider.DAYTONA else None
+            record.worktree_path = (
+                str(handle.root) if config.provider == SandboxProvider.LOCAL else None
+            )
+            record.tmux_session = (
+                handle.attach_label
+                if config.provider == SandboxProvider.LOCAL
+                else None
+            )
+            record.workspace_name = (
+                handle.attach_label
+                if config.provider == SandboxProvider.DAYTONA
+                else None
+            )
             record.workspace_url = handle.workspace_url
             write_agent_record(root, record)
             append_event(
@@ -214,7 +267,9 @@ def spawn(
     table.add_column("Type")
     table.add_column("Attach")
     for record in spawned:
-        table.add_row(record.agent_id, record.agent_type.value, " ".join(record.attach_cmd))
+        table.add_row(
+            record.agent_id, record.agent_type.value, " ".join(record.attach_cmd)
+        )
     console.print(table)
 
 
@@ -277,23 +332,31 @@ def findings(
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     entries = read_findings(root, remote_name=config.coordination_remote)
-    filtered = filter_findings(entries, since=since, agent=agent, last=last, kind=kind, source=source)
+    filtered = filter_findings(
+        entries, since=since, agent=agent, last=last, kind=kind, source=source
+    )
     console.print(render_findings(filtered))
 
 
 @app.command()
 def sync() -> None:
-    """Manually rebase the current sandbox branch onto the shared trunk."""
+    """Manually rebase the current sandbox branch onto the active sync target."""
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
+    branch = sync_target_branch(
+        remote_name=config.coordination_remote, base_branch=config.trunk_base
+    )
     ok, result = try_sync_branch(
         root,
         remote_name=config.coordination_remote,
-        branch=TRUNK_BRANCH,
+        branch=branch,
         conflict_path=conflict_path(root),
     )
     if ok:
-        console.print("Synced with trunk.")
+        if uses_managed_trunk(remote_name=config.coordination_remote):
+            console.print("Synced with trunk.")
+        else:
+            console.print(f"Synced with base branch {config.trunk_base}.")
         return
     if result == "conflict":
         raise typer.Exit(code=1)
@@ -302,20 +365,56 @@ def sync() -> None:
 
 @app.command()
 def promote() -> None:
-    """Merge the current sandbox branch into the shared trunk."""
+    """Promote the current sandbox branch using the provider-specific flow."""
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     meta = load_sandbox_meta(root)
-    summary = promote_branch(root, remote_name=config.coordination_remote, current_branch_name=current_branch(root))
+    branch_name = current_branch(root)
+    if uses_managed_trunk(remote_name=config.coordination_remote):
+        summary = promote_branch(
+            root,
+            remote_name=config.coordination_remote,
+            current_branch_name=branch_name,
+        )
+        message = f"Promoted: {summary}"
+        title = summary
+        url = None
+    else:
+        repo_remote = remote_url(root, config.coordination_remote)
+        ensure_github_remote(repo_remote)
+        ensure_github_cli_ready(root)
+        repo_name = github_repo_name(repo_remote)
+        push_branch_for_pr(
+            root, remote_name=config.coordination_remote, branch=branch_name
+        )
+        entries = read_findings(root, remote_name=config.coordination_remote)
+        finding = latest_promotion_finding(entries, agent_id=meta["agent_id"])
+        title = build_promotion_title(branch_name=branch_name, finding=finding)
+        body = build_promotion_body(
+            branch_name=branch_name, base_branch=config.trunk_base, finding=finding
+        )
+        pull_request = create_or_reuse_pull_request(
+            root,
+            repo_name=repo_name,
+            base_branch=config.trunk_base,
+            head_branch=branch_name,
+            title=title,
+            body=body,
+        )
+        action = "Opened" if pull_request.created else "Updated"
+        message = f"{action} PR #{pull_request.number} against {config.trunk_base}.\n{pull_request.url}"
+        title = pull_request.title
+        url = pull_request.url
+        summary = pull_request.title
     write_findings_entry(
         root,
         remote_name=config.coordination_remote,
         agent_id=meta["agent_id"],
-        message=f"Promoted: {summary}",
+        message=message,
         kind="promotion",
         source=None,
-        title=summary,
-        url=None,
+        title=title,
+        url=url,
     )
     update_root_runtime_from_env(
         config=config,
@@ -323,7 +422,7 @@ def promote() -> None:
         event_type="promotion",
         summary=summary,
     )
-    console.print(f"Promoted: {summary}")
+    console.print(message)
 
 
 @app.command()
@@ -337,15 +436,26 @@ def status() -> None:
     by_type = Counter(record.agent_type.value for record in records)
     active = sum(1 for record in records if record.state == AgentState.ACTIVE)
     promotions = sum(1 for entry in entries if entry.kind == "promotion")
-    sha, subject = trunk_head(root, remote_name=config.coordination_remote)
+    target_branch = sync_target_branch(
+        remote_name=config.coordination_remote, base_branch=config.trunk_base
+    )
+    sha, subject = branch_head(
+        root, remote_name=config.coordination_remote, branch=target_branch
+    )
     table = Table(title="Revis Status")
     table.add_column("Metric")
     table.add_column("Value")
-    table.add_row("Agents", ", ".join(f"{count} {name}" for name, count in sorted(by_type.items())) or "0")
+    table.add_row(
+        "Agents",
+        ", ".join(f"{count} {name}" for name, count in sorted(by_type.items())) or "0",
+    )
     table.add_row("Active", str(active))
     table.add_row("Findings", str(len(entries)))
     table.add_row("Promotions", str(promotions))
-    table.add_row("Trunk", f"{sha[:8]} {subject}")
+    if uses_managed_trunk(remote_name=config.coordination_remote):
+        table.add_row("Trunk", f"{sha[:8]} {subject}")
+    else:
+        table.add_row(f"Base ({config.trunk_base})", f"{sha[:8]} {subject}")
     console.print(table)
     agent_table = Table(title="Agents")
     agent_table.add_column("Agent")
@@ -420,7 +530,11 @@ def prompt_provider() -> SandboxProvider:
     Raises:
         typer.BadParameter: If the user enters an unsupported provider.
     """
-    value = typer.prompt("Sandbox provider [local/daytona]", default="local").strip().lower()
+    value = (
+        typer.prompt("Sandbox provider [local/daytona]", default="local")
+        .strip()
+        .lower()
+    )
     if value not in {"local", "daytona"}:
         raise typer.BadParameter("provider must be local or daytona")
     return SandboxProvider(value)
@@ -486,7 +600,9 @@ def determine_remote_name(root: Path, provider: SandboxProvider) -> str:
     raise RevisError("Daytona mode requires a configured git remote such as origin")
 
 
-def configure_coordination_remote(root: Path, provider: SandboxProvider, remote_name: str) -> str:
+def configure_coordination_remote(
+    root: Path, provider: SandboxProvider, remote_name: str
+) -> str:
     """Resolve or create the coordination remote target URL/path.
 
     Args:
@@ -543,6 +659,60 @@ def validate_daytona_support() -> None:
         raise RevisError(f"Daytona is not ready: {exc}") from exc
 
 
+def latest_promotion_finding(
+    entries: list[FindingEntry], *, agent_id: str
+) -> FindingEntry | None:
+    """Return the newest agent finding that can seed a promotion PR."""
+    preferred = {"result", "literature", "warning"}
+    for entry in entries:
+        if entry.agent == agent_id and entry.kind in preferred:
+            return entry
+    for entry in entries:
+        if entry.agent == agent_id and entry.kind != "promotion":
+            return entry
+    return None
+
+
+def build_promotion_title(*, branch_name: str, finding: FindingEntry | None) -> str:
+    """Build a PR title with the required Revis prefix."""
+    summary = branch_name
+    if finding is not None:
+        summary = finding.title or first_non_empty_line(finding.body)
+    if summary.startswith("[Revis] "):
+        return summary
+    return f"[Revis] {summary}"
+
+
+def build_promotion_body(
+    *, branch_name: str, base_branch: str, finding: FindingEntry | None
+) -> str:
+    """Render the initial PR body from the latest finding context."""
+    lines = [
+        "Automated promotion candidate from Revis.",
+        "",
+        f"- Base branch: `{base_branch}`",
+        f"- Agent branch: `{branch_name}`",
+    ]
+    if finding is not None:
+        summary = finding.title or first_non_empty_line(finding.body)
+        lines.append(f"- Finding: {summary}")
+        excerpt = first_non_empty_line(finding.body)
+        if excerpt != summary:
+            lines.append(f"- Excerpt: {excerpt}")
+        if finding.url:
+            lines.append(f"- URL: {finding.url}")
+    return "\n".join(lines)
+
+
+def first_non_empty_line(body: str) -> str:
+    """Return the first non-empty line from a markdown body."""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    raise RevisError("Finding body is empty.")
+
+
 def next_agent_numbers(records: list[AgentRuntimeRecord]) -> dict[AgentType, int]:
     """Compute the next numeric suffix to use for each agent type.
 
@@ -580,7 +750,9 @@ def refresh_runtime(root: Path, config: RevisConfig) -> None:
         write_agent_record(root, updated)
 
 
-def update_root_runtime_from_env(*, config: RevisConfig, agent_id: str, event_type: str, summary: str) -> None:
+def update_root_runtime_from_env(
+    *, config: RevisConfig, agent_id: str, event_type: str, summary: str
+) -> None:
     """Write runtime updates back to the project root from inside a sandbox.
 
     Args:

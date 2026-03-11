@@ -1,6 +1,6 @@
 # Revis
 
-Revis is the coordination layer that enables multiple coding agents to collaborate on the same research problem[^1]. Run N coding agents on your repo simultaneously with `revis spawn --codex N`. Agents independently explore different ideas, share findings in real-time, and stack improvements automatically through a git-native protocol. Agents can run locally or on cloud sandboxes via Daytona.
+Revis is the coordination layer that enables multiple coding agents to collaborate on the same research problem[^1]. Run N coding agents on your repo simultaneously with `revis spawn --codex N`. Agents independently explore different ideas, share findings in real-time, and submit candidate improvements through a git-native protocol. Agents can run locally or on cloud sandboxes via Daytona.
 
 ## Install
 ```bash
@@ -38,27 +38,20 @@ revis log "Set weight decay to 0.3. T4 pass rate changed from 35% to 41% over 20
 # Read what other agents have found (also auto-refreshed to .revis/latest-findings.md)
 revis findings
 
-# Merge an improvement into the shared trunk
+# Submit a candidate improvement
 revis promote
 
-# Rebase onto latest trunk to pick up others' improvements (also runs automatically via daemon)
+# Rebase onto the current sync target (also runs automatically via daemon)
 revis sync
 ```
-
-You describe the objective during `revis init`. The agents handle everything
-else: deciding what to explore, running experiments, logging results, and
-promoting wins. You watch from `revis monitor` and merge `revis/trunk` back
-into your branch when you're satisfied.
-
-Findings are neutral records, not self-analysis. Agents log what they changed or
-read and what they observed. They do not log what those results imply, whether
-they are good or bad, or what to try next. Diagnosis happens later when agents
-read synced findings from the shared ledger.
 
 ## How It Works
 
 Each agent gets its own sandbox with a full git clone of your repo and
-a dedicated working branch `revis/<agent-id>/work`. They coordinate through two shared git branches:
+a dedicated working branch `revis/<agent-id>/work`. Agents share insights via the shared `revis/findings` branch, and
+promote progress by opening/updating PRs. 
+
+### Coordination Protocol
 
 **`revis/findings`** - An append-only orphan branch (no shared commit history with main) where every agent commits a short
 markdown file after each experiment or source-reading pass, describing only
@@ -68,16 +61,6 @@ latest entries to a local file in each sandbox, so every agent always has access
 to everyone else's work. Failures get logged too:
 `tried X. Error rate increased from 2% to 15%.`
 
-**`revis/trunk`** - Fork of current branch, only moves forward. When an agent
-proves an improvement, it merges its working branch into trunk and pushes. A
-background daemon in every other sandbox automatically rebases onto the latest
-trunk, so each agent's next experiment builds on top of every proven win.
-Improvements compound across agents without any manual merging.
-
-The daemon runs inside each sandbox on a configurable interval, handling the
-git fetch/rebase cycle deterministically. Agents don't need to remember to
-sync, they just read files and run experiments.
-
 The wording boundary matters. **An agent that already holds a hypothesis will
 read its own results through that lens, so its interpretation is the least
 independent one available and risks anchoring every other agent that syncs it.** 
@@ -86,6 +69,14 @@ adds interpretation through connotation. Literature findings follow the same rul
 they may summarize source claims and include one neutral sentence of relevance framing 
 such as `Read while investigating retrieval-heavy architectures.`, 
 but they should not add implications such as `this suggests we should adopt...`.
+
+**Agent branch promotion** - When an agent believes it has a candidate improvement (i.e. a commit or series of commits
+that moves a metric, fixes a failure, or otherwise advances the objective), it runs `revis promote`. This pushes the agent 
+branch and opens or updates a GitHub PR against the configured base branch.
+
+A daemon runs inside each sandbox on a configurable interval, handling the
+git fetch/rebase cycle deterministically. Agents don't need to remember to
+sync, they just read files and run experiments.
 
 ## Project Structure
 ```text
@@ -97,9 +88,9 @@ src/revis/
 │   ├── instructions.py     # Skill and protocol file generation per sandbox
 │   └── templates.py        # AGENTS.md, protocol.md, objective.md templates
 ├── coordination/
-│   ├── daemon.py           # Background sync loop (findings fetch, trunk rebase, heartbeat)
+│   ├── daemon.py           # Background sync loop (findings fetch, provider-specific rebase, heartbeat)
 │   ├── findings.py         # Ledger append, read, render to latest-findings.md
-│   ├── git.py              # Branch creation, merge, rebase, push-with-retry
+│   ├── git.py              # Findings branch, sync targets, merges, and PR helpers
 │   ├── runtime.py          # Agent registry, event log, daemon health tracking
 │   └── sandbox_meta.py     # Per-sandbox state (agent ID, branch, attach command)
 ├── core/

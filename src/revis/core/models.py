@@ -54,7 +54,7 @@ class FindingKind(StrEnum):
         RESULT: Routine experiment outcome.
         CLAIM: Advisory claim on a source or direction.
         LITERATURE: Summary derived from a paper or external source.
-        PROMOTION: Record of a trunk promotion.
+        PROMOTION: Record of a local trunk merge or remote PR promotion.
         WARNING: Cautionary note for other agents.
     """
 
@@ -127,8 +127,9 @@ class RevisConfig:
         provider: Selected sandbox provider.
         default_agent: Default agent type used by `revis spawn --n`.
         codex_template: Launch template for Codex sessions.
-        coordination_remote: Git remote used for trunk and findings branches.
-        trunk_base: User branch that trunk was initialized from.
+        coordination_remote: Git remote used for findings, sync, and promotion.
+        trunk_base: User branch used as the sync and PR target when coordination
+            runs against a real git remote.
         daemon_interval_minutes: Background sync cadence.
         objective: Objective source configuration.
         retention: Retention settings for local runtime artifacts.
@@ -206,7 +207,7 @@ class RuntimeRegistry:
         provider: Sandbox provider used by the swarm.
         started_at: ISO-8601 timestamp when runtime tracking began.
         objective_hash: Hash of the effective objective text.
-        trunk_branch: Shared trunk branch name.
+        trunk_branch: Active sync target branch for the current provider.
         findings_branch: Shared findings branch name.
         config_path: Absolute path to the project config file.
     """

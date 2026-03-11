@@ -13,7 +13,7 @@ from daytona import CreateSandboxFromImageParams, Daytona, DaytonaNotFoundError,
 from revis import __version__
 from revis.core.config import CONFIG_PATH
 from revis.agent.credentials import copy_codex_auth, daytona_agent_env, template_executable
-from revis.coordination.git import TRUNK_BRANCH, credential_store_entry, local_git_credentials, normalize_http_remote, remote_url
+from revis.coordination.git import credential_store_entry, local_git_credentials, normalize_http_remote, remote_url
 from revis.agent.instructions import install_sandbox_instructions, render_startup_prompt, revis_ignore_patterns
 from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, SandboxHandle
 from revis.sandbox.base import SandboxProvider
@@ -68,7 +68,7 @@ class DaytonaSandboxProvider(SandboxProvider):
             sandbox.git.clone(
                 url=clone_remote,
                 path="repo",
-                branch=TRUNK_BRANCH,
+                branch=self.config.trunk_base,
                 username=git_username,
                 password=git_password,
             )
@@ -93,7 +93,7 @@ class DaytonaSandboxProvider(SandboxProvider):
                                         "checkout",
                                         "-B",
                                         f"revis/{agent_id}/work",
-                                        f"{self.config.coordination_remote}/{TRUNK_BRANCH}",
+                                        f"{self.config.coordination_remote}/{self.config.trunk_base}",
                                     ]
                                 ),
                                 shell_join(["git", "config", "user.name", agent_id]),
@@ -263,7 +263,7 @@ class DaytonaSandboxProvider(SandboxProvider):
         executable = self._agent_executable(agent_type)
         image = Image.debian_slim("3.12").run_commands(
             "apt-get update",
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux nodejs npm",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux nodejs npm gh",
         )
         if executable == "codex":
             image = image.run_commands("npm install -g @openai/codex")
@@ -294,7 +294,14 @@ class DaytonaSandboxProvider(SandboxProvider):
             sandbox.fs.upload_file(str(credentials_path), f"{remote_repo}/.git/.revis-credentials")
         command = " && ".join(
             [
-                shell_join(["git", "config", "credential.helper", "store --file .git/.revis-credentials"]),
+                shell_join(
+                    [
+                        "git",
+                        "config",
+                        "credential.helper",
+                        f"store --file {remote_repo}/.git/.revis-credentials",
+                    ]
+                ),
                 shell_join(["git", "config", "credential.useHttpPath", "true"]),
                 shell_join(["chmod", "600", ".git/.revis-credentials"]),
             ]

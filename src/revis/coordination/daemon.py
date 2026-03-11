@@ -1,4 +1,4 @@
-"""Background daemon that refreshes findings and syncs sandboxes to trunk."""
+"""Background daemon that refreshes findings and syncs sandboxes to their active base."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from pathlib import Path
 
 from revis.core.config import load_config
 from revis.coordination.findings import write_dashboard_files
-from revis.coordination.git import FINDINGS_BRANCH, TRUNK_BRANCH, current_branch, read_findings, try_sync_branch
+from revis.coordination.git import read_findings, sync_target_branch, try_sync_branch
 from revis.coordination.runtime import append_event, append_metric, load_agent_record, write_agent_record
 from revis.coordination.sandbox_meta import load_sandbox_meta
-from revis.core.util import RevisError, iso_now
+from revis.core.util import iso_now
 
 
 def daemon_log_path(repo: Path) -> Path:
@@ -75,10 +75,11 @@ def run_daemon_cycle(repo: Path) -> None:
 
     project_root = Path(meta["project_root"]) if meta.get("project_root") else None
     agent_id = meta["agent_id"]
+    branch = sync_target_branch(remote_name=config.coordination_remote, base_branch=config.trunk_base)
     ok, result = try_sync_branch(
         repo,
         remote_name=config.coordination_remote,
-        branch=TRUNK_BRANCH,
+        branch=branch,
         conflict_path=conflict_path(repo),
     )
     timestamp = iso_now()

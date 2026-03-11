@@ -1,10 +1,12 @@
-"""Git-backed coordination primitives for trunk, findings, and sandbox sync."""
+"""Git-backed coordination primitives for trunk, findings, sync, and promotion."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -16,6 +18,22 @@ from revis.core.util import RevisError, ensure_dir, iso_now, parse_iso, run, she
 TRUNK_BRANCH = "revis/trunk"
 # Append-only branch that stores one markdown file per finding.
 FINDINGS_BRANCH = "revis/findings"
+
+
+@dataclass(slots=True)
+class PullRequestRef:
+    """Minimal PR metadata returned from GitHub CLI lookups."""
+
+    number: int
+    url: str
+    title: str
+    created: bool
+
+
+def uses_managed_trunk(*, remote_name: str) -> bool:
+    """Return whether coordination uses the local fallback trunk workflow."""
+
+    return remote_name == "revis-local"
 
 
 def resolve_repo_root(cwd: Path) -> Path:
@@ -261,22 +279,25 @@ def bootstrap_remote(
     remote_name: str,
     target_url: str,
     trunk_base_branch: str,
+    manage_trunk: bool,
 ) -> None:
-    """Initialize trunk and findings branches on the coordination remote.
+    """Initialize findings and, when needed, trunk branches on the coordination remote.
 
     Args:
         root: Repository root.
         remote_name: Remote name that points at the coordination remote.
         target_url: URL or local path of the coordination remote.
         trunk_base_branch: User branch trunk was initialized from.
+        manage_trunk: Whether this provider keeps using the Revis-managed trunk.
     """
     add_or_update_remote(root, remote_name, target_url)
-    if has_commits(root):
-        run(["git", "push", "--force", remote_name, f"HEAD:refs/heads/{TRUNK_BRANCH}"], cwd=root)
-    else:
-        seed_empty_trunk(target_url)
-    seed_findings_branch(target_url)
-    if target_url.endswith(".git") and Path(target_url).exists():
+    if manage_trunk:
+        if has_commits(root):
+            run(["git", "push", "--force", remote_name, f"HEAD:refs/heads/{TRUNK_BRANCH}"], cwd=root)
+        else:
+            seed_empty_trunk(target_url)
+    seed_findings_branch(target_url, source_branch=TRUNK_BRANCH if manage_trunk else trunk_base_branch)
+    if manage_trunk and target_url.endswith(".git") and Path(target_url).exists():
         run(["git", "--git-dir", target_url, "symbolic-ref", "HEAD", f"refs/heads/{TRUNK_BRANCH}"], cwd=root, check=False)
 
 
@@ -295,14 +316,15 @@ def seed_empty_trunk(remote_url_value: str) -> None:
         run(["git", "push", "--force", "origin", f"{TRUNK_BRANCH}:refs/heads/{TRUNK_BRANCH}"], cwd=temp_root)
 
 
-def seed_findings_branch(remote_url_value: str) -> None:
+def seed_findings_branch(remote_url_value: str, *, source_branch: str) -> None:
     """Seed the orphan findings branch with a bootstrap finding.
 
     Args:
         remote_url_value: Coordination remote URL or local bare path.
+        source_branch: Existing branch used as a temporary clone base.
     """
     with temp_dir("revis-seed-findings-") as temp_root:
-        run(["git", "clone", "--branch", TRUNK_BRANCH, remote_url_value, str(temp_root / "repo")], cwd=temp_root)
+        run(["git", "clone", "--branch", source_branch, remote_url_value, str(temp_root / "repo")], cwd=temp_root)
         repo = temp_root / "repo"
         set_git_identity(repo, name="Revis", email="revis@localhost")
         run(["git", "checkout", "--orphan", FINDINGS_BRANCH], cwd=repo)
@@ -337,15 +359,27 @@ def clone_remote(remote_url_value: str, remote_name: str, dest: Path, *, branch:
 
 
 def create_agent_branch(repo: Path, *, remote_name: str, agent_branch: str) -> None:
-    """Create or reset an agent work branch from trunk.
+    """Create or reset an agent work branch from a remote base branch.
 
     Args:
         repo: Sandbox repo root.
         remote_name: Coordination remote name.
         agent_branch: Agent work branch name to create.
     """
-    fetch_remote_branch(repo, remote_name=remote_name, branch=TRUNK_BRANCH)
-    run(["git", "checkout", "-B", agent_branch, f"{remote_name}/{TRUNK_BRANCH}"], cwd=repo)
+    create_agent_branch_from(repo, remote_name=remote_name, agent_branch=agent_branch, base_branch=TRUNK_BRANCH)
+
+
+def create_agent_branch_from(repo: Path, *, remote_name: str, agent_branch: str, base_branch: str) -> None:
+    """Create or reset an agent work branch from the selected remote branch.
+
+    Args:
+        repo: Sandbox repo root.
+        remote_name: Coordination remote name.
+        agent_branch: Agent work branch name to create.
+        base_branch: Remote branch used as the branch point.
+    """
+    fetch_remote_branch(repo, remote_name=remote_name, branch=base_branch)
+    run(["git", "checkout", "-B", agent_branch, f"{remote_name}/{base_branch}"], cwd=repo)
 
 
 def set_git_identity(repo: Path, *, name: str, email: str) -> None:
@@ -571,7 +605,7 @@ def sync_branch(repo: Path, *, remote_name: str, branch: str) -> None:
 
 
 def try_sync_branch(repo: Path, *, remote_name: str, branch: str, conflict_path: Path) -> tuple[bool, str]:
-    """Attempt a trunk rebase and classify the outcome.
+    """Attempt a rebase onto the provider-selected sync branch and classify the outcome.
 
     Args:
         repo: Sandbox repo root.
@@ -596,6 +630,24 @@ def try_sync_branch(repo: Path, *, remote_name: str, branch: str, conflict_path:
     return False, "conflict"
 
 
+def sync_target_branch(*, remote_name: str, base_branch: str) -> str:
+    """Return the branch each coordination mode should rebase agents onto.
+
+    Local tmux sandboxes can still coordinate through GitHub. Only the fallback
+    `revis-local` remote keeps using the managed trunk path.
+    """
+    if uses_managed_trunk(remote_name=remote_name):
+        return TRUNK_BRANCH
+    return base_branch
+
+
+def remote_branch_exists(repo: Path, *, remote_name: str, branch: str) -> bool:
+    """Return whether a named branch exists on the remote."""
+
+    result = run(["git", "ls-remote", "--exit-code", "--heads", remote_name, branch], cwd=repo, check=False)
+    return result.returncode == 0
+
+
 def promote_branch(repo: Path, *, remote_name: str, current_branch_name: str) -> str:
     """Merge the current agent branch into trunk and push the update.
 
@@ -617,20 +669,132 @@ def promote_branch(repo: Path, *, remote_name: str, current_branch_name: str) ->
         return summary
 
 
-def trunk_head(repo: Path, *, remote_name: str) -> tuple[str, str]:
-    """Return the current trunk commit hash and subject line.
+def branch_head(repo: Path, *, remote_name: str, branch: str) -> tuple[str, str]:
+    """Return the current remote branch commit hash and subject line.
 
     Args:
         repo: Repository root.
         remote_name: Coordination remote name.
+        branch: Remote branch to inspect.
 
     Returns:
-        tuple[str, str]: Trunk commit hash and subject line.
+        tuple[str, str]: Commit hash and subject line.
     """
-    fetch_remote_branch(repo, remote_name=remote_name, branch=TRUNK_BRANCH)
-    sha = run(["git", "rev-parse", f"{remote_name}/{TRUNK_BRANCH}"], cwd=repo).stdout.strip()
-    subject = run(["git", "log", "-1", "--pretty=%s", f"{remote_name}/{TRUNK_BRANCH}"], cwd=repo).stdout.strip()
+    fetch_remote_branch(repo, remote_name=remote_name, branch=branch)
+    sha = run(["git", "rev-parse", f"{remote_name}/{branch}"], cwd=repo).stdout.strip()
+    subject = run(["git", "log", "-1", "--pretty=%s", f"{remote_name}/{branch}"], cwd=repo).stdout.strip()
     return sha, subject
+
+
+def trunk_head(repo: Path, *, remote_name: str) -> tuple[str, str]:
+    """Return the current trunk commit hash and subject line."""
+    return branch_head(repo, remote_name=remote_name, branch=TRUNK_BRANCH)
+
+
+def ensure_github_cli_ready(repo: Path) -> None:
+    """Fail fast when GitHub CLI is unavailable for PR-based promotion."""
+    if shutil.which("gh") is None:
+        raise RevisError("GitHub CLI is not installed. Install `gh` before using PR-based promotion.")
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+        return
+    result = run(["gh", "auth", "status", "--hostname", "github.com"], cwd=repo, check=False)
+    if result.returncode != 0:
+        raise RevisError("GitHub CLI is not authenticated. Set GH_TOKEN/GITHUB_TOKEN or run `gh auth login`.")
+
+
+def ensure_github_remote(url: str) -> str:
+    """Validate that a remote points at GitHub and return its HTTPS form."""
+    normalized = normalize_http_remote(url)
+    hostname = urlparse(normalized).hostname
+    if hostname != "github.com":
+        raise RevisError(f"GitHub PR promotion requires a github.com remote, got: {url}")
+    return normalized
+
+
+def github_repo_name(url: str) -> str:
+    """Return the `OWNER/REPO` slug for a GitHub remote."""
+
+    normalized = ensure_github_remote(url)
+    path = urlparse(normalized).path.removeprefix("/").removesuffix(".git")
+    parts = path.split("/")
+    if len(parts) < 2:
+        raise RevisError(f"Could not determine OWNER/REPO from remote URL: {url}")
+    return f"{parts[0]}/{parts[1]}"
+
+
+def push_branch_for_pr(repo: Path, *, remote_name: str, branch: str) -> None:
+    """Push an agent branch so GitHub can open or update a PR for it."""
+    run(["git", "push", "--force-with-lease", "-u", remote_name, f"{branch}:{branch}"], cwd=repo)
+
+
+def find_open_pull_request(repo: Path, *, repo_name: str, base_branch: str, head_branch: str) -> PullRequestRef | None:
+    """Return the open PR for one branch pair, if it exists."""
+    result = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            repo_name,
+            "--state",
+            "open",
+            "--base",
+            base_branch,
+            "--head",
+            head_branch,
+            "--json",
+            "number,url,title",
+        ],
+        cwd=repo,
+    )
+    payload = json.loads(result.stdout)
+    if not payload:
+        return None
+    pr = payload[0]
+    return PullRequestRef(
+        number=int(pr["number"]),
+        url=str(pr["url"]),
+        title=str(pr["title"]),
+        created=False,
+    )
+
+
+def create_or_reuse_pull_request(
+    repo: Path,
+    *,
+    repo_name: str,
+    base_branch: str,
+    head_branch: str,
+    title: str,
+    body: str,
+) -> PullRequestRef:
+    """Create a PR for the current branch pair or return the existing open one."""
+    existing = find_open_pull_request(repo, repo_name=repo_name, base_branch=base_branch, head_branch=head_branch)
+    if existing is not None:
+        return existing
+    run(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            repo_name,
+            "--base",
+            base_branch,
+            "--head",
+            head_branch,
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        cwd=repo,
+    )
+    created = find_open_pull_request(repo, repo_name=repo_name, base_branch=base_branch, head_branch=head_branch)
+    if created is None:
+        raise RevisError("GitHub CLI did not return the created pull request.")
+    created.created = True
+    return created
 
 
 def render_attach_command(argv: list[str]) -> str:
