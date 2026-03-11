@@ -578,7 +578,7 @@ def load_objective_text(root: Path, config: RevisConfig) -> str:
 
 
 def determine_remote_name(root: Path, provider: SandboxProvider) -> str:
-    """Choose the coordination remote name for the selected provider.
+    """Choose the coordination remote name.
 
     Args:
         root: Repository root.
@@ -588,16 +588,19 @@ def determine_remote_name(root: Path, provider: SandboxProvider) -> str:
         str: Coordination remote name.
 
     Raises:
-        RevisError: If Daytona mode cannot determine a usable user-owned remote.
+        RevisError: If Revis cannot infer a single remote to coordinate through.
     """
-    if provider == SandboxProvider.LOCAL:
-        return "revis-local"
+    del provider
     remotes = run_git(root, ["remote"]).splitlines()
     if "origin" in remotes:
         return "origin"
     if len(remotes) == 1:
         return remotes[0]
-    raise RevisError("Daytona mode requires a configured git remote such as origin")
+    if not remotes:
+        return "revis-local"
+    raise RevisError(
+        "Revis could not choose a coordination remote. Set `origin` or leave only one git remote configured."
+    )
 
 
 def configure_coordination_remote(
@@ -613,7 +616,8 @@ def configure_coordination_remote(
     Returns:
         str: Coordination remote URL or local bare path.
     """
-    if provider == SandboxProvider.LOCAL:
+    del provider
+    if uses_managed_trunk(remote_name=remote_name):
         from revis.coordination.git import ensure_coordination_remote
 
         return str(ensure_coordination_remote(root))

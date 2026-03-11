@@ -81,6 +81,8 @@ NOT ALLOWED:
 
 - `.revis/latest-findings.md` is refreshed about every {daemon_interval_minutes} minutes.
 - Your branch is rebased onto the active sync target on that cadence when the worktree is clean.
+- The fallback `revis-local` remote syncs against `revis/trunk`.
+- Any sandbox using a real git remote syncs against the configured base branch and uses GitHub PRs for promotion.
 - Rebase conflicts are written to `.revis/sync-conflict`.
 
 ## Commands
@@ -121,7 +123,7 @@ When working in a Revis sandbox:
 4. Keep experiment findings to what you ran and what you observed. Keep literature findings to source facts plus at most one neutral relevance sentence.
 5. Do not use evaluative wording such as `improved`, `worsened`, `jumped`, `promising`, or `this suggests`.
 6. Analyze implications only after findings sync through the ledger, never inside the finding that records your own experiment or reading result.
-7. Use `revis promote` when you have a candidate improvement on your current branch.
+7. Use `revis promote` when you have a candidate improvement on your current branch. The fallback `revis-local` remote merges to trunk; any real git remote opens or updates a GitHub PR.
 8. If `.revis/sync-conflict` exists, resolve it before continuing.
 """
 

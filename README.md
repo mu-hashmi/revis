@@ -76,7 +76,9 @@ branch and opens or updates a GitHub PR against the configured base branch.
 
 A daemon runs inside each sandbox on a configurable interval, handling the
 git fetch/rebase cycle deterministically. Agents don't need to remember to
-sync, they just read files and run experiments.
+sync, they just read files and run experiments. The fallback `revis-local`
+remote rebases onto `revis/trunk`; any real git remote rebases onto the
+configured base branch.
 
 ## Project Structure
 ```text

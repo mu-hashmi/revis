@@ -9,13 +9,14 @@ from pathlib import Path
 from revis.core.config import CONFIG_PATH
 from revis.agent.credentials import copy_codex_auth, template_executable
 from revis.coordination.git import (
-    TRUNK_BRANCH,
     add_or_update_remote,
     append_info_exclude,
     clone_remote,
     create_agent_branch,
+    create_agent_branch_from,
     remote_url,
     set_git_identity,
+    sync_target_branch,
 )
 from revis.agent.instructions import install_sandbox_instructions, revis_ignore_patterns
 from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, SandboxHandle
@@ -43,9 +44,24 @@ class LocalSandboxProvider(SandboxProvider):
         repo = self.project_root / ".revis" / "agents" / agent_id / "repo"
         branch = f"revis/{agent_id}/work"
         session_name = f"revis-{agent_id}"
+        base_branch = sync_target_branch(
+            remote_name=self.config.coordination_remote, base_branch=self.config.trunk_base
+        )
         try:
-            clone_remote(coordination_url, self.config.coordination_remote, repo)
-            create_agent_branch(repo, remote_name=self.config.coordination_remote, agent_branch=branch)
+            clone_remote(
+                coordination_url, self.config.coordination_remote, repo, branch=base_branch
+            )
+            if base_branch == self.config.trunk_base:
+                create_agent_branch_from(
+                    repo,
+                    remote_name=self.config.coordination_remote,
+                    agent_branch=branch,
+                    base_branch=self.config.trunk_base,
+                )
+            else:
+                create_agent_branch(
+                    repo, remote_name=self.config.coordination_remote, agent_branch=branch
+                )
             set_git_identity(repo, name=agent_id, email=f"{agent_id}@revis.local")
             self._copy_local_config(repo)
             write_sandbox_meta(
