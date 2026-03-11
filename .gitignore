@@ -1,0 +1,18 @@
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+dist/
+build/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Revis runtime state stays local because it only drives monitor/status views.
+.revis/runtime/
+# Local-provider sandboxes are disposable clones, not project source.
+.revis/agents/
+# Local mode uses a hidden bare coordination remote as an implementation detail.
+.revis/coordination.git/
