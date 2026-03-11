@@ -73,14 +73,31 @@ git fetch/rebase cycle deterministically. Agents don't need to remember to
 sync, they just read files and run experiments.
 
 ## Project Structure
-
 ```text
 src/revis/
-├── agent/          # Codex bootstrap, sandbox instructions, and reusable auth plumbing
-├── coordination/   # Git ledger/trunk operations, daemon sync, findings rendering, runtime state
-├── core/           # Shared config, data models, and low-level utility helpers
-├── sandbox/        # Provider adapters for local sandboxes and Daytona sandboxes
-└── cli/            # Typer commands and the Textual monitor
+├── __init__.py
+├── __main__.py
+├── agent/
+│   ├── credentials.py      # Auth detection for Codex CLI sessions
+│   ├── instructions.py     # Skill and protocol file generation per sandbox
+│   └── templates.py        # AGENTS.md, protocol.md, objective.md templates
+├── coordination/
+│   ├── daemon.py           # Background sync loop (findings fetch, trunk rebase, heartbeat)
+│   ├── findings.py         # Ledger append, read, render to latest-findings.md
+│   ├── git.py              # Branch creation, merge, rebase, push-with-retry
+│   ├── runtime.py          # Agent registry, event log, daemon health tracking
+│   └── sandbox_meta.py     # Per-sandbox state (agent ID, branch, attach command)
+├── core/
+│   ├── config.py           # Read/write .revis/config.toml
+│   ├── models.py           # Shared data models (AgentInfo, Finding, etc.)
+│   └── util.py             # Subprocess helpers, timestamp formatting
+├── sandbox/
+│   ├── base.py             # Abstract SandboxProvider interface
+│   ├── daytona.py          # Daytona workspace lifecycle adapter
+│   └── local.py            # Local git clone + tmux session adapter
+└── cli/
+    ├── main.py             # Typer commands (init, spawn, log, findings, sync, promote, status, stop)
+    └── monitor.py          # Textual TUI (live dashboard, agent attach)
 ```
 
 [^1]: "Research problem" here just means any loop where you change something, measure the result, and decide what to try next. Training an ML model and checking if validation loss improved, tuning a codebase and benchmarking if it got faster, adjusting reward functions and evaluating if your agent performs better, the list goes on. Revis makes this loop parallel and collaborative; instead of one agent iterating serially, N agents explore different directions at once, and when one finds something, the rest learn from it immediately.
