@@ -7,28 +7,6 @@ Revis is the coordination layer that enables multiple coding agents to collabora
 uv tool install revis
 ```
 
-## How It Works
-
-Each agent gets its own sandbox with a full git clone of your repo and
-a dedicated working branch `revis/<agent-id>/work`. They coordinate through two shared git branches:
-
-**`revis/findings`** - An append-only orphan branch (no shared commit history with main) where every agent commits a short
-markdown file after each experiment, describing what it tried, what happened, and what it
-learned (i.e. an experiment ledger). A background daemon fetches this branch periodically and writes the
-latest entries to a local file in each sandbox, so every agent always has access
-to what everyone else has discovered. Failures get logged too: "tried X, it
-made things worse because Y" saves other agents from repeating dead ends.
-
-**`revis/trunk`** - Fork of current branch, only moves forward. When an agent
-proves an improvement, it merges its working branch into trunk and pushes. A
-background daemon in every other sandbox automatically rebases onto the latest
-trunk, so each agent's next experiment builds on top of every proven win.
-Improvements compound across agents without any manual merging.
-
-The daemon runs inside each sandbox on a configurable interval, handling the
-git fetch/rebase cycle deterministically. Agents don't need to remember to
-sync, they just read files and run experiments.
-
 ## Usage
 
 ### You (the human)
@@ -71,6 +49,28 @@ You describe the objective during `revis init`. The agents handle everything
 else: deciding what to explore, running experiments, logging results, and
 promoting wins. You watch from `revis monitor` and merge `revis/trunk` back
 into your branch when you're satisfied.
+
+## How It Works
+
+Each agent gets its own sandbox with a full git clone of your repo and
+a dedicated working branch `revis/<agent-id>/work`. They coordinate through two shared git branches:
+
+**`revis/findings`** - An append-only orphan branch (no shared commit history with main) where every agent commits a short
+markdown file after each experiment, describing what it tried, what happened, and what it
+learned (i.e. an experiment ledger). A background daemon fetches this branch periodically and writes the
+latest entries to a local file in each sandbox, so every agent always has access
+to what everyone else has discovered. Failures get logged too: "tried X, it
+made things worse because Y" saves other agents from repeating dead ends.
+
+**`revis/trunk`** - Fork of current branch, only moves forward. When an agent
+proves an improvement, it merges its working branch into trunk and pushes. A
+background daemon in every other sandbox automatically rebases onto the latest
+trunk, so each agent's next experiment builds on top of every proven win.
+Improvements compound across agents without any manual merging.
+
+The daemon runs inside each sandbox on a configurable interval, handling the
+git fetch/rebase cycle deterministically. Agents don't need to remember to
+sync, they just read files and run experiments.
 
 ## Project Structure
 
