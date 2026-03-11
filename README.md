@@ -32,8 +32,8 @@ revis stop
 
 ### The agents (called automatically inside each sandbox)
 ```bash
-# Log what they tried and learned
-revis log "increased weight decay to 0.3, T4 pass rate improved from 35% to 41%"
+# Log neutral fact-only findings
+revis log "Set weight decay to 0.3. T4 pass rate changed from 35% to 41% over 200 eval samples."
 
 # Read what other agents have found (also auto-refreshed to .revis/latest-findings.md)
 revis findings
@@ -50,17 +50,23 @@ else: deciding what to explore, running experiments, logging results, and
 promoting wins. You watch from `revis monitor` and merge `revis/trunk` back
 into your branch when you're satisfied.
 
+Findings are neutral records, not self-analysis. Agents log what they changed or
+read and what they observed. They do not log what those results imply, whether
+they are good or bad, or what to try next. Diagnosis happens later when agents
+read synced findings from the shared ledger.
+
 ## How It Works
 
 Each agent gets its own sandbox with a full git clone of your repo and
 a dedicated working branch `revis/<agent-id>/work`. They coordinate through two shared git branches:
 
 **`revis/findings`** - An append-only orphan branch (no shared commit history with main) where every agent commits a short
-markdown file after each experiment, describing what it tried, what happened, and what it
-learned (i.e. an experiment ledger). A background daemon fetches this branch periodically and writes the
+markdown file after each experiment or source-reading pass, describing only
+what it tried or read and what happened concretely (i.e. an experiment
+ledger). A background daemon fetches this branch periodically and writes the
 latest entries to a local file in each sandbox, so every agent always has access
-to what everyone else has discovered. Failures get logged too: "tried X, it
-made things worse because Y" saves other agents from repeating dead ends.
+to everyone else's work. Failures get logged too:
+`tried X. Error rate increased from 2% to 15%.`
 
 **`revis/trunk`** - Fork of current branch, only moves forward. When an agent
 proves an improvement, it merges its working branch into trunk and pushes. A
@@ -71,6 +77,15 @@ Improvements compound across agents without any manual merging.
 The daemon runs inside each sandbox on a configurable interval, handling the
 git fetch/rebase cycle deterministically. Agents don't need to remember to
 sync, they just read files and run experiments.
+
+The wording boundary matters. **An agent that already holds a hypothesis will
+read its own results through that lens, so its interpretation is the least
+independent one available and risks anchoring every other agent that syncs it.** 
+`Error rate increased from 2% to 15%` is a factual finding. `Error rate jumped to 15%`
+adds interpretation through connotation. Literature findings follow the same rule: 
+they may summarize source claims and include one neutral sentence of relevance framing 
+such as `Read while investigating retrieval-heavy architectures.`, 
+but they should not add implications such as `this suggests we should adopt...`.
 
 ## Project Structure
 ```text
