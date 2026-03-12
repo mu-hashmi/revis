@@ -222,6 +222,7 @@ def _decode_agent_record(data: dict[str, object]) -> AgentRuntimeRecord:
         conflict_path=data.get("conflict_path"),
         attach_cmd=list(data.get("attach_cmd", [])),
         attach_label=data.get("attach_label"),
+        starting_direction=data.get("starting_direction"),
         worktree_path=data.get("worktree_path"),
         tmux_session=data.get("tmux_session"),
         daemon_pid=data.get("daemon_pid"),

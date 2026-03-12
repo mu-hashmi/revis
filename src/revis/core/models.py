@@ -168,6 +168,7 @@ class AgentRuntimeRecord:
         conflict_path: Path to a surfaced sync-conflict file, if any.
         attach_cmd: Command used by the monitor to attach to the session.
         attach_label: Human-facing attach label such as a tmux session name.
+        starting_direction: Optional seeded starting direction collected at spawn.
         worktree_path: Local sandbox repo path when applicable.
         tmux_session: Tmux session name for local sandboxes.
         daemon_pid: Local daemon PID when tracked.
@@ -191,6 +192,7 @@ class AgentRuntimeRecord:
     conflict_path: str | None = None
     attach_cmd: list[str] = field(default_factory=list)
     attach_label: str | None = None
+    starting_direction: str | None = None
     worktree_path: str | None = None
     tmux_session: str | None = None
     daemon_pid: int | None = None

@@ -28,13 +28,22 @@ from revis.core.util import RevisError, ensure_dir, run, shell_join, substitute_
 class LocalSandboxProvider(SandboxProvider):
     """Provision local agent sandboxes as disposable clones plus tmux sessions."""
 
-    def spawn(self, *, agent_id: str, agent_type: AgentType, objective_text: str, resume: bool) -> SandboxHandle:
+    def spawn(
+        self,
+        *,
+        agent_id: str,
+        agent_type: AgentType,
+        objective_text: str,
+        protocol_objective_text: str,
+        resume: bool,
+    ) -> SandboxHandle:
         """Create one local clone, then launch tmux-backed agent and daemon.
 
         Args:
             agent_id: Stable Revis agent identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
+            protocol_objective_text: Shared research objective text.
             resume: Whether the spawn is resuming prior work.
 
         Returns:
@@ -75,6 +84,7 @@ class LocalSandboxProvider(SandboxProvider):
                 repo,
                 agent_type=agent_type,
                 objective_text=objective_text,
+                protocol_objective_text=protocol_objective_text,
                 daemon_interval_minutes=self.config.daemon_interval_minutes,
                 codex_home=repo / ".revis" / "codex-home",
             )

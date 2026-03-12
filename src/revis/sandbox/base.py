@@ -27,13 +27,22 @@ class SandboxProvider(ABC):
         self.config = config
 
     @abstractmethod
-    def spawn(self, *, agent_id: str, agent_type: AgentType, objective_text: str, resume: bool) -> SandboxHandle:
+    def spawn(
+        self,
+        *,
+        agent_id: str,
+        agent_type: AgentType,
+        objective_text: str,
+        protocol_objective_text: str,
+        resume: bool,
+    ) -> SandboxHandle:
         """Create a sandbox, launch the agent, and return attach metadata.
 
         Args:
             agent_id: Stable Revis agent identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
+            protocol_objective_text: Shared research objective text.
             resume: Whether the spawn is resuming prior work.
 
         Returns:

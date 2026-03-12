@@ -219,9 +219,15 @@ class RevisMonitor(App[None]):
         lines = [
             f"Agent: {record.agent_id}",
             f"Branch: {record.branch}",
-            f"Sandbox: {record.sandbox_path_or_id}",
-            f"Attach: {' '.join(record.attach_cmd) if record.attach_cmd else '-'}",
         ]
+        if record.starting_direction:
+            lines.append(f"Starting direction: {record.starting_direction}")
+        lines.extend(
+            [
+                f"Sandbox: {record.sandbox_path_or_id}",
+                f"Attach: {' '.join(record.attach_cmd) if record.attach_cmd else '-'}",
+            ]
+        )
         if record.last_error:
             lines.append(f"Error: {record.last_error}")
         if record.conflict_path:

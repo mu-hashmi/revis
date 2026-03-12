@@ -34,13 +34,22 @@ class DaytonaSandboxProvider(SandboxProvider):
         super().__init__(project_root, config)
         self.client = Daytona()
 
-    def spawn(self, *, agent_id: str, agent_type: AgentType, objective_text: str, resume: bool) -> SandboxHandle:
+    def spawn(
+        self,
+        *,
+        agent_id: str,
+        agent_type: AgentType,
+        objective_text: str,
+        protocol_objective_text: str,
+        resume: bool,
+    ) -> SandboxHandle:
         """Create a Daytona sandbox, clone the repo, and launch Codex in tmux.
 
         Args:
             agent_id: Stable Revis agent identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
+            protocol_objective_text: Shared research objective text.
             resume: Whether the spawn is resuming prior work.
 
         Returns:
@@ -118,6 +127,7 @@ class DaytonaSandboxProvider(SandboxProvider):
                 agent_id=agent_id,
                 agent_type=agent_type,
                 objective_text=objective_text,
+                protocol_objective_text=protocol_objective_text,
             )
             self._install_revis(sandbox, remote_repo=remote_repo)
             self._append_info_exclude(sandbox, remote_repo)
@@ -316,6 +326,7 @@ class DaytonaSandboxProvider(SandboxProvider):
         agent_id: str,
         agent_type: AgentType,
         objective_text: str,
+        protocol_objective_text: str,
     ) -> None:
         """Upload Revis bootstrap files and reusable auth into the sandbox.
 
@@ -325,6 +336,7 @@ class DaytonaSandboxProvider(SandboxProvider):
             agent_id: Stable Revis agent identifier.
             agent_type: Agent type running in the sandbox.
             objective_text: Effective research objective text.
+            protocol_objective_text: Shared research objective text.
         """
         with temp_dir("revis-daytona-bootstrap-") as temp_root:
             (temp_root / ".revis").mkdir(parents=True, exist_ok=True)
@@ -340,6 +352,7 @@ class DaytonaSandboxProvider(SandboxProvider):
                 temp_root,
                 agent_type=agent_type,
                 objective_text=objective_text,
+                protocol_objective_text=protocol_objective_text,
                 daemon_interval_minutes=self.config.daemon_interval_minutes,
                 codex_home=temp_root / ".revis" / "codex-home",
                 trusted_project_path=remote_repo,

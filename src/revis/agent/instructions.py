@@ -37,24 +37,52 @@ def render_startup_prompt(*, agent_id: str, agent_type: AgentType) -> str:
     return startup_prompt(agent_id=agent_id)
 
 
+def render_objective_text(*, objective_text: str, starting_direction: str | None = None) -> str:
+    """Render the effective per-agent objective document.
+
+    Args:
+        objective_text: Shared research objective text.
+        starting_direction: Optional advisory starting direction for this agent.
+
+    Returns:
+        str: Markdown content for `.revis/objective.md`.
+    """
+
+    base = objective_text.strip()
+    if not starting_direction:
+        return base + "\n"
+    direction = starting_direction.strip()
+    return (
+        base
+        + "\n\n## Starting Direction\n\n"
+        + f"Suggested starting direction: {direction}\n\n"
+        + "This is an initial suggestion, not a constraint. Follow stronger evidence from the findings ledger if it points elsewhere.\n"
+    )
+
+
 def write_shared_protocol(
     root: Path,
     *,
     objective_text: str,
+    protocol_objective_text: str,
     daemon_interval_minutes: int,
 ) -> None:
     """Write the shared protocol and objective files into a sandbox.
 
     Args:
         root: Sandbox repo root.
-        objective_text: Effective research objective text.
+        objective_text: Effective per-agent objective text.
+        protocol_objective_text: Shared research objective text.
         daemon_interval_minutes: Configured daemon sync interval.
     """
 
     revis_dir = ensure_dir(root / ".revis")
-    (revis_dir / "objective.md").write_text(objective_text.strip() + "\n")
+    (revis_dir / "objective.md").write_text(objective_text)
     (revis_dir / "protocol.md").write_text(
-        protocol_body(objective_text=objective_text, daemon_interval_minutes=daemon_interval_minutes)
+        protocol_body(
+            objective_text=protocol_objective_text,
+            daemon_interval_minutes=daemon_interval_minutes,
+        )
     )
 
 
@@ -63,6 +91,7 @@ def install_sandbox_instructions(
     *,
     agent_type: AgentType,
     objective_text: str,
+    protocol_objective_text: str,
     daemon_interval_minutes: int,
     codex_home: Path | None = None,
     trusted_project_path: str | None = None,
@@ -73,6 +102,7 @@ def install_sandbox_instructions(
         root: Sandbox repo root.
         agent_type: Agent type running in the sandbox.
         objective_text: Effective research objective text.
+        protocol_objective_text: Shared objective text for the protocol document.
         daemon_interval_minutes: Configured daemon sync interval.
         codex_home: Optional sandbox-local Codex home directory override.
         trusted_project_path: Optional path that should be marked trusted in the
@@ -84,7 +114,12 @@ def install_sandbox_instructions(
 
     if agent_type != AgentType.CODEX:
         raise RevisError("Unsupported agent type.")
-    write_shared_protocol(root, objective_text=objective_text, daemon_interval_minutes=daemon_interval_minutes)
+    write_shared_protocol(
+        root,
+        objective_text=objective_text,
+        protocol_objective_text=protocol_objective_text,
+        daemon_interval_minutes=daemon_interval_minutes,
+    )
     ensure_sandbox_bootstraps(root)
     install_codex_skill(
         root,

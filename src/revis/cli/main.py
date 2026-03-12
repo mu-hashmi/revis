@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
 from collections import Counter
 from pathlib import Path
+from textwrap import shorten
 
 import typer
 from rich.console import Console
@@ -14,8 +16,9 @@ from rich.table import Table
 
 from revis import __version__
 from revis.agent.credentials import ensure_agent_cli_ready
-from revis.agent.instructions import revis_ignore_patterns
+from revis.agent.instructions import render_objective_text, revis_ignore_patterns
 from revis.cli.monitor import run_monitor
+from revis.cli.spawn_seed import collect_starting_directions
 from revis.coordination.daemon import conflict_path, run_daemon_loop
 from revis.coordination.findings import filter_findings, render_findings
 from revis.coordination.git import (
@@ -185,6 +188,20 @@ def spawn(
         validate_agent_launch(
             agent_type, config.provider, config=config, require_daytona_credentials=True
         )
+    existing = load_all_agent_records(root)
+    next_numbers = next_agent_numbers(existing)
+    planned_agents: list[tuple[AgentType, str, str]] = []
+    for agent_type, count in counts.items():
+        for _ in range(count):
+            number = next_numbers[agent_type]
+            next_numbers[agent_type] += 1
+            agent_id = f"{agent_type.value}-{number}"
+            planned_agents.append(
+                (agent_type, agent_id, f"revis/{agent_id}/work")
+            )
+    starting_directions = prompt_starting_directions(
+        [agent_id for _, agent_id, _ in planned_agents]
+    )
     registry = load_registry(root)
     if registry is None:
         registry = RuntimeRegistry(
@@ -199,69 +216,69 @@ def spawn(
             config_path=str(root / CONFIG_PATH),
         )
         write_registry(root, registry)
-    existing = load_all_agent_records(root)
-    next_numbers = next_agent_numbers(existing)
     spawned: list[AgentRuntimeRecord] = []
-    for agent_type, count in counts.items():
-        for _ in range(count):
-            number = next_numbers[agent_type]
-            next_numbers[agent_type] += 1
-            agent_id = f"codex-{number}"
-            branch = f"revis/{agent_id}/work"
-            record = AgentRuntimeRecord(
+    for agent_type, agent_id, branch in planned_agents:
+        starting_direction = starting_directions.get(agent_id)
+        effective_objective = render_objective_text(
+            objective_text=objective_text,
+            starting_direction=starting_direction,
+        )
+        record = AgentRuntimeRecord(
+            agent_id=agent_id,
+            agent_type=agent_type,
+            provider=config.provider,
+            state=AgentState.STARTING,
+            branch=branch,
+            started_at=iso_now(),
+            sandbox_path_or_id="",
+            starting_direction=starting_direction,
+        )
+        write_agent_record(root, record)
+        try:
+            handle = provider.spawn(
                 agent_id=agent_id,
                 agent_type=agent_type,
-                provider=config.provider,
-                state=AgentState.STARTING,
-                branch=branch,
-                started_at=iso_now(),
-                sandbox_path_or_id="",
+                objective_text=effective_objective,
+                protocol_objective_text=objective_text,
+                resume=resume,
             )
+        except Exception as exc:
+            record.state = AgentState.FAILED
+            record.last_error = str(exc)
             write_agent_record(root, record)
-            try:
-                handle = provider.spawn(
-                    agent_id=agent_id,
-                    agent_type=agent_type,
-                    objective_text=objective_text,
-                    resume=resume,
-                )
-            except Exception as exc:
-                record.state = AgentState.FAILED
-                record.last_error = str(exc)
-                write_agent_record(root, record)
-                raise
-            record.state = AgentState.ACTIVE
-            record.sandbox_path_or_id = handle.provider_id or str(handle.root)
-            record.attach_cmd = handle.attach_cmd
-            record.attach_label = handle.attach_label
-            record.worktree_path = (
-                str(handle.root) if config.provider == SandboxProvider.LOCAL else None
-            )
-            record.tmux_session = (
-                handle.attach_label
-                if config.provider == SandboxProvider.LOCAL
-                else None
-            )
-            record.workspace_name = (
-                handle.attach_label
-                if config.provider == SandboxProvider.DAYTONA
-                else None
-            )
-            record.workspace_url = handle.workspace_url
-            write_agent_record(root, record)
-            append_event(
-                root,
-                {
-                    "timestamp": iso_now(),
-                    "type": "agent_started",
-                    "agent_id": agent_id,
-                    "summary": handle.attach_label,
-                },
-                retention_entries=config.retention.max_event_entries,
-                retention_bytes=config.retention.max_event_bytes,
-                retention_archives=config.retention.max_event_archives,
-            )
-            spawned.append(record)
+            raise
+        record.state = AgentState.ACTIVE
+        record.sandbox_path_or_id = handle.provider_id or str(handle.root)
+        record.attach_cmd = handle.attach_cmd
+        record.attach_label = handle.attach_label
+        record.worktree_path = (
+            str(handle.root) if config.provider == SandboxProvider.LOCAL else None
+        )
+        record.tmux_session = (
+            handle.attach_label
+            if config.provider == SandboxProvider.LOCAL
+            else None
+        )
+        record.workspace_name = (
+            handle.attach_label
+            if config.provider == SandboxProvider.DAYTONA
+            else None
+        )
+        record.workspace_url = handle.workspace_url
+        write_agent_record(root, record)
+        append_event(
+            root,
+            {
+                "timestamp": iso_now(),
+                "type": "agent_started",
+                "agent_id": agent_id,
+                "summary": handle.attach_label,
+            },
+            retention_entries=config.retention.max_event_entries,
+            retention_bytes=config.retention.max_event_bytes,
+            retention_archives=config.retention.max_event_archives,
+        )
+        spawned.append(record)
     table = Table(title="Spawned Agents")
     table.add_column("Agent")
     table.add_column("Type")
@@ -462,6 +479,7 @@ def status() -> None:
     agent_table.add_column("State")
     agent_table.add_column("Last heartbeat")
     agent_table.add_column("Last sync")
+    agent_table.add_column("Starting direction")
     agent_table.add_column("Attach")
     for record in records:
         agent_table.add_row(
@@ -469,6 +487,7 @@ def status() -> None:
             record.state.value,
             record.last_heartbeat or "-",
             record.last_sync_result or "-",
+            summarize_starting_direction(record.starting_direction),
             " ".join(record.attach_cmd) if record.attach_cmd else "-",
         )
     console.print(agent_table)
@@ -555,6 +574,29 @@ def parse_objective(root: Path, value: str) -> ObjectiveConfig:
     if resolved.exists():
         return ObjectiveConfig(file=str(resolved.relative_to(root)))
     return ObjectiveConfig(text=value)
+
+
+def prompt_starting_directions(agent_ids: list[str]) -> dict[str, str | None]:
+    """Collect optional starting directions for a spawn batch."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        console.print(
+            "[red]revis spawn requires an interactive terminal for seeded divergence.[/red]"
+        )
+        raise typer.Exit(code=1)
+    try:
+        return collect_starting_directions(agent_ids)
+    except KeyboardInterrupt:
+        console.print("[yellow]Spawn cancelled.[/yellow]")
+        raise typer.Exit(code=1)
+
+
+def summarize_starting_direction(value: str | None) -> str:
+    """Render a compact starting-direction summary for status tables."""
+
+    if not value:
+        return "-"
+    return shorten(value, width=32, placeholder="...")
 
 
 def load_objective_text(root: Path, config: RevisConfig) -> str:
