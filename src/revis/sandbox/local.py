@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from pathlib import Path
@@ -22,6 +23,8 @@ from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, Sandbox
 from revis.coordination.sandbox_meta import write_sandbox_meta
 from revis.core.util import RevisError, ensure_dir, run, shell_join, substitute_argv
 from revis.sandbox.base import SandboxProvider
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 class LocalSandboxProvider(SandboxProvider):
@@ -52,6 +55,7 @@ class LocalSandboxProvider(SandboxProvider):
         """
         coordination_url = remote_url(self.project_root, self.config.coordination_remote)
         repo = self.project_root / ".revis" / "agents" / agent_id / "repo"
+        codex_home = self._sandbox_codex_home(repo)
         branch = f"revis/{agent_id}/work"
         session_name = f"revis-{agent_id}"
         base_branch = sync_target_branch(
@@ -99,7 +103,7 @@ class LocalSandboxProvider(SandboxProvider):
                 objective_text=objective_text,
                 protocol_objective_text=protocol_objective_text,
                 daemon_interval_minutes=self.config.daemon_interval_minutes,
-                codex_home=repo / ".revis" / "codex-home",
+                codex_home=codex_home,
             )
             self._sync_local_agent_credentials(repo, agent_type=agent_type)
             append_info_exclude(repo, revis_ignore_patterns())
@@ -119,8 +123,8 @@ class LocalSandboxProvider(SandboxProvider):
                 agent_type=agent_type,
                 root=repo,
                 branch=branch,
-                attach_cmd=["tmux", "attach", "-t", session_name],
-                attach_label=session_name,
+                attach_cmd=["tmux", "attach", "-t", f"{session_name}:0"],
+                attach_label=f"{session_name}:agent",
             )
         except Exception:
             # Half-created local sandboxes are cheaper to discard than to debug.
@@ -140,8 +144,18 @@ class LocalSandboxProvider(SandboxProvider):
             AgentRuntimeRecord: Updated runtime record.
         """
         session = record.tmux_session or f"revis-{record.agent_id}"
-        active = run(["tmux", "has-session", "-t", session], check=False, capture=True).returncode == 0
+        active = (
+            run(
+                ["tmux", "has-session", "-t", session],
+                check=False,
+                capture=True,
+            ).returncode
+            == 0
+        )
         record.state = AgentState.ACTIVE if active else AgentState.STOPPED
+        if active:
+            record.attach_cmd = ["tmux", "attach", "-t", f"{session}:0"]
+            record.attach_label = f"{session}:agent"
 
         # Refresh daemon-produced heartbeat and conflict markers.
         repo = Path(record.sandbox_path_or_id)
@@ -151,6 +165,28 @@ class LocalSandboxProvider(SandboxProvider):
         conflict = repo / ".revis" / "sync-conflict"
         record.conflict_path = str(conflict) if conflict.exists() else None
         return record
+
+    def capture_activity(
+        self,
+        record: AgentRuntimeRecord,
+        *,
+        line_limit: int = 120,
+    ) -> list[str]:
+        """Return recent tmux-pane output for one local agent session."""
+
+        session = record.tmux_session or f"revis-{record.agent_id}"
+        completed = run(
+            ["tmux", "capture-pane", "-t", f"{session}:0", "-p"],
+            check=False,
+        )
+        if completed.returncode != 0:
+            return [f"tmux capture failed for {session}:0"]
+
+        cleaned = ANSI_ESCAPE_RE.sub("", completed.stdout).replace("\r", "")
+        lines = cleaned.splitlines()
+        if not lines:
+            return ["No agent output yet."]
+        return lines[-line_limit:]
 
     def stop(self, record: AgentRuntimeRecord, *, force: bool) -> AgentRuntimeRecord:
         """Stop the tmux session and remove the local sandbox clone.
@@ -219,7 +255,7 @@ class LocalSandboxProvider(SandboxProvider):
             raise RevisError("Revis local sandboxes are codex-only right now.")
         if template_executable(self.config.codex_template.argv) != "codex":
             return
-        copy_codex_auth(repo / ".revis" / "codex-home")
+        copy_codex_auth(self._sandbox_codex_home(repo))
 
     def _start_tmux_session(
         self,
@@ -255,7 +291,21 @@ class LocalSandboxProvider(SandboxProvider):
         run(["tmux", "rename-window", "-t", f"{session_name}:0", "agent"], capture=True)
         # Keeping the daemon in the same session makes local debugging a single
         # tmux attach instead of two separate process hunts.
-        run(["tmux", "new-window", "-t", session_name, "-n", "daemon", "-c", str(repo), daemon_command], capture=True)
+        run(
+            [
+                "tmux",
+                "new-window",
+                "-t",
+                session_name,
+                "-n",
+                "daemon",
+                "-c",
+                str(repo),
+                daemon_command,
+            ],
+            capture=True,
+        )
+        run(["tmux", "select-window", "-t", f"{session_name}:0"], capture=True)
 
     def _render_agent_command(self, repo: Path, *, agent_id: str, agent_type: AgentType) -> str:
         """Render the shell command used for the local Codex process.
@@ -279,9 +329,14 @@ class LocalSandboxProvider(SandboxProvider):
         # Local sandboxes can mirror findings/promotion activity back into the
         # host runtime registry because they share the same filesystem.
         env_vars = {"REVIS_PROJECT_ROOT": str(self.project_root)}
-        env_vars["CODEX_HOME"] = str(repo / ".revis" / "codex-home")
+        env_vars["CODEX_HOME"] = str(self._sandbox_codex_home(repo))
         command = ["env", *[f"{key}={value}" for key, value in env_vars.items()], *argv]
         return shell_join(command)
+
+    def _sandbox_codex_home(self, repo: Path) -> Path:
+        """Return the sandbox-local Codex home path outside the repo clone."""
+
+        return repo.parent / "codex-home"
 
 
 def install_prompt(repo: Path, *, agent_id: str, agent_type: AgentType) -> str:

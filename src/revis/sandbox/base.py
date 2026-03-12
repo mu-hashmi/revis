@@ -65,6 +65,24 @@ class SandboxProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def capture_activity(
+        self,
+        record: AgentRuntimeRecord,
+        *,
+        line_limit: int = 120,
+    ) -> list[str]:
+        """Return recent live activity for one agent session.
+
+        Args:
+            record: Current persisted runtime record.
+            line_limit: Maximum number of recent lines to return.
+
+        Returns:
+            list[str]: Recent agent-session transcript lines.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def stop(self, record: AgentRuntimeRecord, *, force: bool) -> AgentRuntimeRecord:
         """Stop and clean up the sandbox backing a runtime record.
 

@@ -237,6 +237,7 @@ class FakeProvider:
     probe_state: AgentState = AgentState.ACTIVE
     stop_calls: list[tuple[str, bool]] | None = None
     probe_calls: list[str] | None = None
+    activity_lines: list[str] | None = None
 
     def spawn(
         self,
@@ -269,6 +270,18 @@ class FakeProvider:
             self.probe_calls.append(record.agent_id)
         record.state = self.probe_state
         return record
+
+    def capture_activity(
+        self,
+        record: AgentRuntimeRecord,
+        *,
+        line_limit: int = 120,
+    ) -> list[str]:
+        """Return deterministic activity lines for monitor tests."""
+
+        del record
+        lines = self.activity_lines or []
+        return lines[-line_limit:]
 
     def stop(self, record: AgentRuntimeRecord, *, force: bool) -> AgentRuntimeRecord:
         """Capture stop calls and mark the record stopped."""

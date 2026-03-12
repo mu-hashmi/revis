@@ -13,6 +13,7 @@ from rich.table import Table
 
 from revis import __version__
 from revis.agent.credentials import ensure_agent_cli_ready
+from revis.cli.interactive import MenuOption, prompt_text, select_option
 from revis.cli.monitor import run_monitor
 from revis.cli.spawn_seed import collect_starting_directions
 from revis.coordination.bootstrap import bootstrap_remote
@@ -59,6 +60,7 @@ from revis.core.config import default_codex_template, load_config, save_config
 from revis.core.models import (
     AgentState,
     AgentType,
+    FindingEntry,
     MonitorConfig,
     ObjectiveConfig,
     RetentionConfig,
@@ -70,6 +72,12 @@ from revis.sandbox import get_provider
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
+
+
+def operator_findings(entries: list[FindingEntry]) -> list[FindingEntry]:
+    """Filter out Revis bootstrap ledger entries from operator summaries."""
+
+    return [entry for entry in entries if entry.agent != "revis"]
 
 
 @app.callback()
@@ -96,25 +104,14 @@ def init() -> None:
     provider = prompt_provider()
     console.print("Supported coding agents: codex")
     console.print("Default coding agent: codex")
-    objective_value = typer.prompt(
-        "Research objective (inline text or path to a markdown file)"
-    ).strip()
-    daemon_interval = typer.prompt("Daemon interval in minutes", default="15").strip()
-    objective = parse_objective(root, objective_value)
+    objective = prompt_objective(root)
+    daemon_interval = prompt_text("Daemon interval in minutes", default="15").strip()
     branch = current_branch(root)
     remote_name = determine_remote_name(root)
 
-    # Explain the provider tradeoffs before writing any project state.
-    if provider == SandboxProvider.LOCAL:
-        console.print(
-            "[yellow]Local mode creates one full clone per agent and launches agents with full permissions inside those clones.[/yellow]"
-        )
-    else:
+    # Daytona requires a ready SDK before any config is written.
+    if provider == SandboxProvider.DAYTONA:
         validate_daytona_support()
-        console.print(
-            "[yellow]Daytona mode keeps sandboxes isolated, but agent and git credentials must be provided at spawn time via environment variables. "
-            "Revis does not store those secrets in config.[/yellow]"
-        )
     validate_agent_launch(AgentType.CODEX, provider, require_daytona_credentials=False)
     if working_tree_dirty(root):
         console.print(
@@ -291,7 +288,12 @@ def findings(
     config = load_config(root)
     entries = read_findings(root, remote_name=config.coordination_remote)
     filtered = filter_findings(
-        entries, since=since, agent=agent, last=last, kind=kind, source=source
+        operator_findings(entries),
+        since=since,
+        agent=agent,
+        last=last,
+        kind=kind,
+        source=source,
     )
     console.print(render_findings(filtered))
 
@@ -418,7 +420,9 @@ def status() -> None:
     config = load_config(root)
     refresh_runtime(root, config)
     records = load_all_agent_records(root)
-    entries = read_findings(root, remote_name=config.coordination_remote)
+    entries = operator_findings(
+        read_findings(root, remote_name=config.coordination_remote)
+    )
     by_type = Counter(record.agent_type.value for record in records)
     active = sum(1 for record in records if record.state == AgentState.ACTIVE)
     promotions = sum(1 for entry in entries if entry.kind == "promotion")
@@ -515,22 +519,81 @@ def daemon_run() -> None:
 
 
 def prompt_provider() -> SandboxProvider:
-    """Prompt for the sandbox provider during interactive init.
+    """Prompt for the sandbox provider with an inline arrow-key menu.
 
     Returns:
         SandboxProvider: Selected sandbox provider enum value.
-
-    Raises:
-        typer.BadParameter: If the user enters an unsupported provider.
     """
-    value = (
-        typer.prompt("Sandbox provider [local/daytona]", default="local")
-        .strip()
-        .lower()
+    choice = select_option(
+        "Sandbox provider",
+        [
+            MenuOption(
+                value=SandboxProvider.LOCAL.value,
+                label="local (full clone per agent)",
+            ),
+            MenuOption(
+                value=SandboxProvider.DAYTONA.value,
+                label="daytona (remote workspace)",
+            ),
+        ],
+        note="Select where Revis should launch agent sandboxes.",
     )
-    if value not in {"local", "daytona"}:
-        raise typer.BadParameter("provider must be local or daytona")
-    return SandboxProvider(value)
+    return SandboxProvider(choice.value)
+
+
+def discover_markdown_files(root: Path) -> list[str]:
+    """Return repo-relative markdown files worth offering as objectives."""
+
+    ignored_dirs = {".git", ".revis", ".venv", "node_modules"}
+    markdown_paths: list[str] = []
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        if any(part in ignored_dirs for part in relative.parts):
+            continue
+        markdown_paths.append(str(relative))
+    return markdown_paths
+
+
+def prompt_objective(root: Path) -> ObjectiveConfig:
+    """Prompt for the research objective, preferring discovered markdown files."""
+
+    markdown_paths = discover_markdown_files(root)
+    if not markdown_paths:
+        value = prompt_text(
+            "Research objective (inline text or path to a markdown file)"
+        )
+        return parse_objective(root, value)
+
+    options = [
+        MenuOption(
+            value=path,
+            label=path,
+        )
+        for path in markdown_paths
+    ]
+    options.append(
+        MenuOption(
+            value="__custom__",
+            label="enter inline text or path to markdown file",
+        )
+    )
+    choice = select_option(
+        "Research objective",
+        options,
+        note=(
+            "Select a markdown file or the custom entry. "
+            "If you enter custom mode, submit a blank line to go back."
+        ),
+    )
+    if choice.value == "__custom__":
+        value = prompt_text(
+            "Research objective (inline text or path to a markdown file)",
+            allow_blank=True,
+        ).strip()
+        if not value:
+            return prompt_objective(root)
+        return parse_objective(root, value)
+    return parse_objective(root, choice.value)
 
 
 def parse_objective(root: Path, value: str) -> ObjectiveConfig:

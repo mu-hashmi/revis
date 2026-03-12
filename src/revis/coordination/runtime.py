@@ -9,15 +9,23 @@ from pathlib import Path
 
 import tomli_w
 
-from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, RuntimeRegistry, SandboxProvider
+from revis.core.models import (
+    AgentRuntimeRecord,
+    AgentState,
+    AgentType,
+    RuntimeRegistry,
+    SandboxProvider,
+)
 from revis.core.util import append_jsonl, ensure_dir, read_json, write_json
 
 
 # Runtime files back the monitor and status views; they are intentionally local-only.
 RUNTIME_DIR = Path(".revis/runtime")
+ACTIVITY_LINE_LIMIT = 200
+ACTIVITY_BYTE_LIMIT = 128_000
 
 
-def _compact(value):
+def _compact(value: object) -> object:
     """Recursively drop `None` values before serialization.
 
     Args:
@@ -69,6 +77,12 @@ def metrics_dir(root: Path) -> Path:
         Path: Runtime metrics directory.
     """
     return ensure_dir(runtime_dir(root) / "metrics")
+
+
+def activity_dir(root: Path) -> Path:
+    """Return the directory containing per-agent activity snapshots."""
+
+    return ensure_dir(runtime_dir(root) / "activity")
 
 
 def events_path(root: Path) -> Path:
@@ -293,7 +307,14 @@ def _decode_agent_record(data: dict[str, object]) -> AgentRuntimeRecord:
     )
 
 
-def append_event(root: Path, event: dict[str, object], *, retention_entries: int, retention_bytes: int, retention_archives: int) -> None:
+def append_event(
+    root: Path,
+    event: dict[str, object],
+    *,
+    retention_entries: int,
+    retention_bytes: int,
+    retention_archives: int,
+) -> None:
     """Append one runtime event and enforce retention bounds.
 
     Args:
@@ -309,7 +330,12 @@ def append_event(root: Path, event: dict[str, object], *, retention_entries: int
     append_jsonl(path, event)
 
     # Enforce retention after every append so the monitor never reads unbounded logs.
-    rotate_events(path, retention_entries=retention_entries, retention_bytes=retention_bytes, retention_archives=retention_archives)
+    rotate_events(
+        path,
+        retention_entries=retention_entries,
+        retention_bytes=retention_bytes,
+        retention_archives=retention_archives,
+    )
 
 
 def load_events(root: Path, *, limit: int | None = None) -> list[dict[str, object]]:
@@ -331,7 +357,13 @@ def load_events(root: Path, *, limit: int | None = None) -> list[dict[str, objec
     return [json.loads(line) for line in lines if line.strip()]
 
 
-def rotate_events(path: Path, *, retention_entries: int, retention_bytes: int, retention_archives: int) -> None:
+def rotate_events(
+    path: Path,
+    *,
+    retention_entries: int,
+    retention_bytes: int,
+    retention_archives: int,
+) -> None:
     """Rotate the live event log into bounded archives.
 
     Args:
@@ -379,6 +411,55 @@ def metric_path(root: Path, agent_id: str) -> Path:
         Path: Per-agent metric file path.
     """
     return metrics_dir(root) / f"{agent_id}.json"
+
+
+def activity_path(root: Path, agent_id: str) -> Path:
+    """Return the activity snapshot path for one agent.
+
+    Args:
+        root: Repository root.
+        agent_id: Stable Revis agent identifier.
+
+    Returns:
+        Path: Per-agent activity log path.
+    """
+
+    return activity_dir(root) / f"{agent_id}.log"
+
+
+def write_activity_snapshot(root: Path, agent_id: str, lines: list[str]) -> None:
+    """Persist a bounded activity snapshot for one agent.
+
+    Args:
+        root: Repository root.
+        agent_id: Stable Revis agent identifier.
+        lines: Recent activity lines in display order.
+    """
+
+    bounded = lines[-ACTIVITY_LINE_LIMIT:]
+    while bounded and len("\n".join(bounded).encode("utf-8")) > ACTIVITY_BYTE_LIMIT:
+        bounded = bounded[1:]
+    payload = "\n".join(bounded)
+    if payload:
+        payload += "\n"
+    activity_path(root, agent_id).write_text(payload)
+
+
+def load_activity(root: Path, agent_id: str) -> list[str]:
+    """Load the persisted activity snapshot for one agent.
+
+    Args:
+        root: Repository root.
+        agent_id: Stable Revis agent identifier.
+
+    Returns:
+        list[str]: Stored activity lines from the latest snapshot.
+    """
+
+    path = activity_path(root, agent_id)
+    if not path.exists():
+        return []
+    return path.read_text().splitlines()
 
 
 def load_metrics(root: Path, agent_id: str) -> list[dict[str, object]]:

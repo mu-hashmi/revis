@@ -255,6 +255,34 @@ class DaytonaSandboxProvider(SandboxProvider):
             record.conflict_path = None
         return record
 
+    def capture_activity(
+        self,
+        record: AgentRuntimeRecord,
+        *,
+        line_limit: int = 120,
+    ) -> list[str]:
+        """Return recent tmux-pane output for one Daytona agent session."""
+
+        try:
+            sandbox = self.client.get(record.sandbox_path_or_id)
+        except DaytonaNotFoundError:
+            return ["Sandbox no longer exists."]
+
+        repo = sandbox.get_work_dir().rstrip("/") + "/repo"
+        response = sandbox.process.exec(
+            f"tmux capture-pane -t revis-{record.agent_id}:0 -p",
+            cwd=repo,
+            timeout=10,
+        )
+        if response.exit_code != 0:
+            return [response.result.strip() or "tmux capture failed."]
+
+        cleaned = response.result.replace("\r", "")
+        lines = cleaned.splitlines()
+        if not lines:
+            return ["No agent output yet."]
+        return lines[-line_limit:]
+
     def stop(self, record: AgentRuntimeRecord, *, force: bool) -> AgentRuntimeRecord:
         """Delete the Daytona sandbox that backs an agent.
 
