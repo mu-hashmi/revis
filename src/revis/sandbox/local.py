@@ -6,23 +6,22 @@ import shutil
 import time
 from pathlib import Path
 
-from revis.core.config import CONFIG_PATH
 from revis.agent.credentials import copy_codex_auth, template_executable
-from revis.coordination.git import (
-    add_or_update_remote,
+from revis.agent.instructions import install_sandbox_instructions, revis_ignore_patterns
+from revis.coordination.repo import (
     append_info_exclude,
     clone_remote,
     create_agent_branch,
     create_agent_branch_from,
     remote_url,
     set_git_identity,
-    sync_target_branch,
 )
-from revis.agent.instructions import install_sandbox_instructions, revis_ignore_patterns
+from revis.coordination.sync import sync_target_branch
+from revis.core.config import CONFIG_PATH
 from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, SandboxHandle
-from revis.sandbox.base import SandboxProvider
 from revis.coordination.sandbox_meta import write_sandbox_meta
 from revis.core.util import RevisError, ensure_dir, run, shell_join, substitute_argv
+from revis.sandbox.base import SandboxProvider
 
 
 class LocalSandboxProvider(SandboxProvider):
@@ -54,7 +53,8 @@ class LocalSandboxProvider(SandboxProvider):
         branch = f"revis/{agent_id}/work"
         session_name = f"revis-{agent_id}"
         base_branch = sync_target_branch(
-            remote_name=self.config.coordination_remote, base_branch=self.config.trunk_base
+            remote_name=self.config.coordination_remote,
+            base_branch=self.config.trunk_base,
         )
         try:
             # Local sandboxes follow the same sync target the daemon will later
@@ -63,7 +63,10 @@ class LocalSandboxProvider(SandboxProvider):
 
             # Prepare the disposable repo clone and work branch.
             clone_remote(
-                coordination_url, self.config.coordination_remote, repo, branch=base_branch
+                coordination_url,
+                self.config.coordination_remote,
+                repo,
+                branch=base_branch,
             )
             if base_branch == self.config.trunk_base:
                 create_agent_branch_from(
@@ -102,7 +105,12 @@ class LocalSandboxProvider(SandboxProvider):
             # Session names are deterministic per agent so `status` and
             # `monitor` always have a stable attach target after respawns.
             self._kill_session_if_exists(session_name)
-            self._start_tmux_session(repo, session_name=session_name, agent_id=agent_id, agent_type=agent_type)
+            self._start_tmux_session(
+                repo,
+                session_name=session_name,
+                agent_id=agent_id,
+                agent_type=agent_type,
+            )
             return SandboxHandle(
                 agent_id=agent_id,
                 agent_type=agent_type,
@@ -210,7 +218,14 @@ class LocalSandboxProvider(SandboxProvider):
             return
         copy_codex_auth(repo / ".revis" / "codex-home")
 
-    def _start_tmux_session(self, repo: Path, *, session_name: str, agent_id: str, agent_type: AgentType) -> None:
+    def _start_tmux_session(
+        self,
+        repo: Path,
+        *,
+        session_name: str,
+        agent_id: str,
+        agent_type: AgentType,
+    ) -> None:
         """Start the local agent and daemon windows inside one tmux session.
 
         Args:
@@ -220,8 +235,14 @@ class LocalSandboxProvider(SandboxProvider):
             agent_type: Agent type running in the sandbox.
         """
         # Build the two long-lived commands that make up a local sandbox.
-        agent_command = self._render_agent_command(repo, agent_id=agent_id, agent_type=agent_type)
-        daemon_command = shell_join(["env", f"REVIS_PROJECT_ROOT={self.project_root}", "revis", "_daemon-run"])
+        agent_command = self._render_agent_command(
+            repo,
+            agent_id=agent_id,
+            agent_type=agent_type,
+        )
+        daemon_command = shell_join(
+            ["env", f"REVIS_PROJECT_ROOT={self.project_root}", "revis", "_daemon-run"]
+        )
 
         # Start the agent window first, then add the daemon beside it.
         run(

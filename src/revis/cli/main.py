@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import re
 import sys
-import uuid
 from collections import Counter
 from pathlib import Path
 from textwrap import shorten
@@ -16,62 +13,58 @@ from rich.table import Table
 
 from revis import __version__
 from revis.agent.credentials import ensure_agent_cli_ready
-from revis.agent.instructions import render_objective_text, revis_ignore_patterns
 from revis.cli.monitor import run_monitor
 from revis.cli.spawn_seed import collect_starting_directions
+from revis.coordination.bootstrap import bootstrap_remote
 from revis.coordination.daemon import conflict_path, run_daemon_loop
 from revis.coordination.findings import filter_findings, render_findings
-from revis.coordination.git import (
-    FINDINGS_BRANCH,
-    bootstrap_remote,
-    branch_head,
+from revis.coordination.ledger import read_findings, write_findings_entry
+from revis.coordination.promotion import (
+    build_promotion_body,
+    build_promotion_title,
     create_or_reuse_pull_request,
-    current_branch,
     ensure_github_cli_ready,
     ensure_github_remote,
     github_repo_name,
-    is_git_repo,
+    latest_promotion_finding,
     promote_branch,
     push_branch_for_pr,
-    read_findings,
+)
+from revis.coordination.repo import (
+    branch_head,
+    current_branch,
+    is_git_repo,
     remote_branch_exists,
     remote_url,
     resolve_repo_root,
-    sync_target_branch,
-    try_sync_branch,
     uses_managed_trunk,
     working_tree_dirty,
-    write_findings_entry,
 )
 from revis.coordination.runtime import (
     append_event,
-    append_metric,
-    load_agent_record,
     load_all_agent_records,
-    load_registry,
     write_agent_record,
-    write_registry,
 )
+from revis.coordination.runtime_ops import refresh_runtime, update_root_runtime_from_env
 from revis.coordination.sandbox_meta import load_sandbox_meta
-from revis.core.config import (
-    CONFIG_PATH,
-    default_codex_template,
-    load_config,
-    save_config,
+from revis.coordination.setup import (
+    configure_coordination_remote,
+    determine_remote_name,
+    ensure_gitignore,
 )
+from revis.coordination.spawning import plan_agent_spawns, spawn_planned_agents
+from revis.coordination.sync import sync_target_branch, try_sync_branch
+from revis.core.config import default_codex_template, load_config, save_config
 from revis.core.models import (
-    AgentRuntimeRecord,
     AgentState,
     AgentType,
-    FindingEntry,
     MonitorConfig,
     ObjectiveConfig,
     RetentionConfig,
     RevisConfig,
-    RuntimeRegistry,
     SandboxProvider,
 )
-from revis.core.util import RevisError, iso_now, sha256_text
+from revis.core.util import RevisError, iso_now
 from revis.sandbox import get_provider
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -108,9 +101,9 @@ def init() -> None:
     daemon_interval = typer.prompt("Daemon interval in minutes", default="15").strip()
     objective = parse_objective(root, objective_value)
     branch = current_branch(root)
-    remote_name = determine_remote_name(root, provider)
+    remote_name = determine_remote_name(root)
 
-    # Explain provider-specific behavior before writing any config.
+    # Explain the provider tradeoffs before writing any project state.
     if provider == SandboxProvider.LOCAL:
         console.print(
             "[yellow]Local mode creates one full clone per agent and launches agents with full permissions inside those clones.[/yellow]"
@@ -152,7 +145,7 @@ def init() -> None:
         )
 
     # Bootstrap the shared coordination branches and report the result.
-    target_url = configure_coordination_remote(root, provider, remote_name)
+    target_url = configure_coordination_remote(root, remote_name)
     bootstrap_remote(
         root,
         remote_name=remote_name,
@@ -202,98 +195,23 @@ def spawn(
             agent_type, config.provider, config=config, require_daytona_credentials=True
         )
 
-    # Allocate stable agent IDs before collecting seeded directions.
-    existing = load_all_agent_records(root)
-    next_numbers = next_agent_numbers(existing)
-    planned_agents: list[tuple[AgentType, str, str]] = []
-    for agent_type, count in counts.items():
-        for _ in range(count):
-            number = next_numbers[agent_type]
-            next_numbers[agent_type] += 1
-            agent_id = f"{agent_type.value}-{number}"
-            planned_agents.append((agent_type, agent_id, f"revis/{agent_id}/work"))
     # Allocate IDs before prompting so each seeded direction is attached to the
     # exact agent/branch it will influence at spawn time.
+    planned_agents = plan_agent_spawns(load_all_agent_records(root), counts)
     starting_directions = prompt_starting_directions(
-        [agent_id for _, agent_id, _ in planned_agents]
+        [planned_agent.agent_id for planned_agent in planned_agents]
     )
 
-    # Initialize the swarm registry on the first spawn for this project.
-    registry = load_registry(root)
-    if registry is None:
-        registry = RuntimeRegistry(
-            swarm_id=uuid.uuid4().hex[:12],
-            provider=config.provider,
-            started_at=iso_now(),
-            objective_hash=sha256_text(objective_text),
-            trunk_branch=sync_target_branch(
-                remote_name=config.coordination_remote, base_branch=config.trunk_base
-            ),
-            findings_branch=FINDINGS_BRANCH,
-            config_path=str(root / CONFIG_PATH),
-        )
-        write_registry(root, registry)
-
-    # Spawn each agent and persist its runtime metadata as it comes online.
-    spawned: list[AgentRuntimeRecord] = []
-    for agent_type, agent_id, branch in planned_agents:
-        starting_direction = starting_directions.get(agent_id)
-        effective_objective = render_objective_text(
-            objective_text=objective_text,
-            starting_direction=starting_direction,
-        )
-        record = AgentRuntimeRecord(
-            agent_id=agent_id,
-            agent_type=agent_type,
-            provider=config.provider,
-            state=AgentState.STARTING,
-            branch=branch,
-            started_at=iso_now(),
-            sandbox_path_or_id="",
-            starting_direction=starting_direction,
-        )
-        write_agent_record(root, record)
-        try:
-            handle = provider.spawn(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                objective_text=effective_objective,
-                protocol_objective_text=objective_text,
-                resume=resume,
-            )
-        except Exception as exc:
-            record.state = AgentState.FAILED
-            record.last_error = str(exc)
-            write_agent_record(root, record)
-            raise
-        record.state = AgentState.ACTIVE
-        record.sandbox_path_or_id = handle.provider_id or str(handle.root)
-        record.attach_cmd = handle.attach_cmd
-        record.attach_label = handle.attach_label
-        record.worktree_path = (
-            str(handle.root) if config.provider == SandboxProvider.LOCAL else None
-        )
-        record.tmux_session = (
-            handle.attach_label if config.provider == SandboxProvider.LOCAL else None
-        )
-        record.workspace_name = (
-            handle.attach_label if config.provider == SandboxProvider.DAYTONA else None
-        )
-        record.workspace_url = handle.workspace_url
-        write_agent_record(root, record)
-        append_event(
-            root,
-            {
-                "timestamp": iso_now(),
-                "type": "agent_started",
-                "agent_id": agent_id,
-                "summary": handle.attach_label,
-            },
-            retention_entries=config.retention.max_event_entries,
-            retention_bytes=config.retention.max_event_bytes,
-            retention_archives=config.retention.max_event_archives,
-        )
-        spawned.append(record)
+    # Launch the planned batch once the operator has confirmed the divergence.
+    spawned = spawn_planned_agents(
+        root,
+        config=config,
+        provider=provider,
+        objective_text=objective_text,
+        planned_agents=planned_agents,
+        starting_directions=starting_directions,
+        resume=resume,
+    )
 
     # Show attach commands once the whole batch is ready.
     table = Table(title="Spawned Agents")
@@ -487,9 +405,7 @@ def status() -> None:
     target_branch = sync_target_branch(
         remote_name=config.coordination_remote, base_branch=config.trunk_base
     )
-    sha, subject = branch_head(
-        root, remote_name=config.coordination_remote, branch=target_branch
-    )
+    sha, subject = branch_head(root, remote_name=config.coordination_remote, branch=target_branch)
 
     # Render a high-level swarm summary.
     table = Table(title="Revis Status")
@@ -660,83 +576,6 @@ def load_objective_text(root: Path, config: RevisConfig) -> str:
     raise RevisError("Objective is missing from config")
 
 
-def determine_remote_name(root: Path, provider: SandboxProvider) -> str:
-    """Choose the coordination remote name.
-
-    Args:
-        root: Repository root.
-        provider: Selected sandbox provider.
-
-    Returns:
-        str: Coordination remote name.
-
-    Raises:
-        RevisError: If Revis cannot infer a single remote to coordinate through.
-    """
-    del provider
-    remotes = run_git(root, ["remote"]).splitlines()
-    # Prefer `origin` when present because it is the least surprising remote for
-    # both Daytona clones and GitHub-backed promotion.
-    if "origin" in remotes:
-        return "origin"
-    if len(remotes) == 1:
-        return remotes[0]
-    if not remotes:
-        # No remote means Revis needs a private local coordination surface.
-        return "revis-local"
-    raise RevisError(
-        "Revis could not choose a coordination remote. Set `origin` or leave only one git remote configured."
-    )
-
-
-def configure_coordination_remote(
-    root: Path, provider: SandboxProvider, remote_name: str
-) -> str:
-    """Resolve or create the coordination remote target URL/path.
-
-    Args:
-        root: Repository root.
-        provider: Selected sandbox provider.
-        remote_name: Coordination remote name.
-
-    Returns:
-        str: Coordination remote URL or local bare path.
-    """
-    del provider
-    # Coordination ownership is keyed off the remote name, not the provider:
-    # local sandboxes may still coordinate through GitHub, while `revis-local`
-    # means Revis owns the whole trunk/findings remote itself.
-    if uses_managed_trunk(remote_name=remote_name):
-        from revis.coordination.git import ensure_coordination_remote
-
-        return str(ensure_coordination_remote(root))
-    from revis.coordination.git import remote_url
-
-    return remote_url(root, remote_name)
-
-
-def ensure_gitignore(root: Path) -> None:
-    """Append Revis runtime paths to `.gitignore` when missing.
-
-    Args:
-        root: Repository root.
-    """
-    path = root / ".gitignore"
-    existing = path.read_text() if path.exists() else ""
-    lines = [
-        "# Revis runtime state stays untracked because it is ephemeral local monitor data.",
-        ".revis/runtime/",
-        "# Local sandboxes are disposable working clones, not part of the source tree.",
-        ".revis/agents/",
-        "# The local coordination remote is an implementation detail for local-mode swarms.",
-        ".revis/coordination.git/",
-    ]
-    with path.open("a", encoding="utf-8") as handle:
-        for line in lines:
-            if line not in existing:
-                handle.write(f"{line}\n")
-
-
 def validate_daytona_support() -> None:
     """Fail fast when the Daytona SDK is not configured for use.
 
@@ -750,172 +589,6 @@ def validate_daytona_support() -> None:
         Daytona()
     except Exception as exc:
         raise RevisError(f"Daytona is not ready: {exc}") from exc
-
-
-def latest_promotion_finding(
-    entries: list[FindingEntry], *, agent_id: str
-) -> FindingEntry | None:
-    """Return the newest agent finding that can seed a promotion PR."""
-    preferred = {"result", "literature", "warning"}
-    # Promotion PRs read better when they point at the latest concrete work item
-    # rather than an earlier promotion record about the PR itself.
-
-    # Prefer findings that describe actual work over previous promotion records.
-    for entry in entries:
-        if entry.agent == agent_id and entry.kind in preferred:
-            return entry
-
-    # Fall back to any non-promotion finding if nothing preferred exists yet.
-    for entry in entries:
-        if entry.agent == agent_id and entry.kind != "promotion":
-            return entry
-    return None
-
-
-def build_promotion_title(*, branch_name: str, finding: FindingEntry | None) -> str:
-    """Build a PR title with the required Revis prefix."""
-    summary = branch_name
-    if finding is not None:
-        summary = finding.title or first_non_empty_line(finding.body)
-    if summary.startswith("[Revis] "):
-        return summary
-    return f"[Revis] {summary}"
-
-
-def build_promotion_body(
-    *, branch_name: str, base_branch: str, finding: FindingEntry | None
-) -> str:
-    """Render the initial PR body from the latest finding context."""
-    lines = [
-        "Automated promotion candidate from Revis.",
-        "",
-        f"- Base branch: `{base_branch}`",
-        f"- Agent branch: `{branch_name}`",
-    ]
-    if finding is not None:
-        summary = finding.title or first_non_empty_line(finding.body)
-        lines.append(f"- Finding: {summary}")
-        excerpt = first_non_empty_line(finding.body)
-        if excerpt != summary:
-            lines.append(f"- Excerpt: {excerpt}")
-        if finding.url:
-            lines.append(f"- URL: {finding.url}")
-    return "\n".join(lines)
-
-
-def first_non_empty_line(body: str) -> str:
-    """Return the first non-empty line from a markdown body."""
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    raise RevisError("Finding body is empty.")
-
-
-def next_agent_numbers(records: list[AgentRuntimeRecord]) -> dict[AgentType, int]:
-    """Compute the next numeric suffix to use for each agent type.
-
-    Args:
-        records: Existing runtime records.
-
-    Returns:
-        dict[AgentType, int]: Next number to allocate per agent type.
-    """
-    numbers = {AgentType.CODEX: 1}
-    pattern = re.compile(r"^codex-(\d+)$")
-    for record in records:
-        match = pattern.match(record.agent_id)
-        if not match:
-            continue
-        raw_number = match.group(1)
-        numbers[AgentType.CODEX] = max(numbers[AgentType.CODEX], int(raw_number) + 1)
-    return numbers
-
-
-def refresh_runtime(root: Path, config: RevisConfig) -> None:
-    """Refresh persisted runtime records by probing live provider state.
-
-    Args:
-        root: Repository root.
-        config: Loaded project configuration.
-    """
-    # Probe each live sandbox and persist the refreshed record.
-    provider = get_provider(root, config)
-    for record in load_all_agent_records(root):
-        try:
-            updated = provider.probe(record)
-        except Exception as exc:
-            record.last_error = str(exc)
-            updated = record
-        write_agent_record(root, updated)
-
-
-def update_root_runtime_from_env(
-    *, config: RevisConfig, agent_id: str, event_type: str, summary: str
-) -> None:
-    """Write runtime updates back to the project root from inside a sandbox.
-
-    Args:
-        config: Loaded project configuration.
-        agent_id: Agent identifier emitting the event.
-        event_type: Runtime event type.
-        summary: Short event summary.
-    """
-    project_root = os.environ.get("REVIS_PROJECT_ROOT")
-    if not project_root:
-        # Remote sandboxes do not share a writable host filesystem, so only
-        # local mode can opportunistically mirror runtime updates back into
-        # `.revis/runtime`.
-        return
-
-    # Load the host-side runtime record that matches this sandbox.
-    root = Path(project_root)
-    record = load_agent_record(root, agent_id)
-    if not record:
-        return
-
-    # Update the per-agent timestamps first.
-    timestamp = iso_now()
-    if event_type == "finding_logged":
-        record.last_finding_at = timestamp
-    if event_type == "promotion":
-        record.last_promotion_at = timestamp
-    write_agent_record(root, record)
-
-    # Append matching event and metric samples for the monitor UI.
-    append_event(
-        root,
-        {
-            "timestamp": timestamp,
-            "type": event_type,
-            "agent_id": agent_id,
-            "summary": summary,
-        },
-        retention_entries=config.retention.max_event_entries,
-        retention_bytes=config.retention.max_event_bytes,
-        retention_archives=config.retention.max_event_archives,
-    )
-    append_metric(
-        root,
-        agent_id,
-        {"timestamp": timestamp, "event_type": event_type},
-        max_points=config.retention.max_metric_points,
-    )
-
-
-def run_git(root: Path, argv: list[str]) -> str:
-    """Run a git command in a repository and return stdout.
-
-    Args:
-        root: Repository root.
-        argv: Git argv excluding the `git` executable itself.
-
-    Returns:
-        str: Command stdout.
-    """
-    from revis.core.util import run
-
-    return run(["git", *argv], cwd=root).stdout
 
 
 def validate_agent_launch(

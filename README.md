@@ -90,11 +90,18 @@ src/revis/
 │   ├── instructions.py     # Skill and protocol file generation per sandbox
 │   └── templates.py        # AGENTS.md, protocol.md, objective.md templates
 ├── coordination/
+│   ├── bootstrap.py        # Seed shared trunk/findings branches during init
 │   ├── daemon.py           # Background sync loop (findings fetch, provider-specific rebase, heartbeat)
-│   ├── findings.py         # Ledger append, read, render to latest-findings.md
-│   ├── git.py              # Findings branch, sync targets, merges, and PR helpers
+│   ├── findings.py         # Filter/render findings into repo-local dashboards
+│   ├── ledger.py           # Findings branch append/read/parse helpers
+│   ├── promotion.py        # Managed-trunk promotion and GitHub PR helpers
+│   ├── repo.py             # Repo discovery, remotes, branches, and worktrees
 │   ├── runtime.py          # Agent registry, event log, daemon health tracking
-│   └── sandbox_meta.py     # Per-sandbox state (agent ID, branch, attach command)
+│   ├── runtime_ops.py      # Runtime refresh/mirroring helpers above persistence
+│   ├── sandbox_meta.py     # Per-sandbox state (agent ID, branch, attach command)
+│   ├── setup.py            # Init-time remote selection and gitignore helpers
+│   ├── spawning.py         # Non-interactive spawn planning and launch flow
+│   └── sync.py             # Sync target selection and rebase helpers
 ├── core/
 │   ├── config.py           # Read/write .revis/config.toml
 │   ├── models.py           # Shared data models (AgentInfo, Finding, etc.)

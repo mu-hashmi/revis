@@ -1,0 +1,136 @@
+"""Read and write the shared findings ledger branch."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+from revis.core.models import FindingEntry
+from revis.coordination.repo import FINDINGS_BRANCH, with_branch_worktree
+from revis.core.util import RevisError, iso_now, parse_iso, run
+
+
+def write_findings_entry(
+    repo: Path,
+    *,
+    remote_name: str,
+    agent_id: str,
+    message: str,
+    kind: str | None,
+    source: str | None,
+    title: str | None,
+    url: str | None,
+) -> Path:
+    """Write, commit, and push one findings entry on the findings branch."""
+
+    with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
+        timestamp = iso_now()
+
+        # Timestamped filenames keep the ledger append-only and make raw branch
+        # inspection readable even before frontmatter is parsed.
+        filename = timestamp.replace(":", "-") + f"-{agent_id}.md"
+
+        # Build the markdown finding payload.
+        frontmatter = {
+            key: value
+            for key, value in {
+                "agent": agent_id,
+                "timestamp": timestamp,
+                "kind": kind,
+                "source": source,
+                "title": title,
+                "url": url,
+            }.items()
+            if value is not None
+        }
+        header = yaml.safe_dump(frontmatter, sort_keys=False).strip()
+        path = worktree / "findings" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\n{header}\n---\n\n{message.strip()}\n")
+
+        # Commit the new finding onto the detached findings worktree.
+        run(["git", "add", str(path.relative_to(worktree))], cwd=worktree)
+        run(["git", "commit", "-m", f"finding: {agent_id} {timestamp}"], cwd=worktree)
+        attempts = 0
+
+        # Rebase-and-push until we win the race with any concurrent logger.
+        while True:
+            attempts += 1
+            try:
+                # Multiple agents can log concurrently. Rebase-and-retry keeps
+                # every finding as its own commit without introducing a central
+                # coordination service outside git.
+                run(["git", "pull", "--rebase", remote_name, FINDINGS_BRANCH], cwd=worktree)
+                run(["git", "push", remote_name, f"HEAD:refs/heads/{FINDINGS_BRANCH}"], cwd=worktree)
+                break
+            except RevisError:
+                if attempts >= 3:
+                    raise
+        return path
+
+
+def fetch_findings_tree(repo: Path, *, remote_name: str) -> list[Path]:
+    """Return finding file paths from a temporary findings worktree."""
+
+    with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
+        return sorted((worktree / "findings").glob("*.md"))
+
+
+def read_findings(repo: Path, *, remote_name: str) -> list[FindingEntry]:
+    """Read and sort all findings from newest to oldest."""
+
+    entries: list[FindingEntry] = []
+
+    # Parse every finding file from the shared ledger snapshot.
+    with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
+        for path in sorted((worktree / "findings").glob("*.md")):
+            entries.append(parse_finding(path))
+
+    # Return newest-first so CLI consumers can slice without resorting.
+    entries.sort(key=lambda entry: parse_iso(entry.timestamp), reverse=True)
+    return entries
+
+
+def parse_finding(path: Path) -> FindingEntry:
+    """Parse one markdown finding file with YAML frontmatter."""
+
+    content = path.read_text()
+    frontmatter_text, body = _split_frontmatter(content, path=path)
+    data = yaml.safe_load(frontmatter_text) or {}
+    if not isinstance(data, dict):
+        raise RevisError(f"Invalid finding frontmatter: {path}")
+
+    try:
+        return FindingEntry(
+            path=str(path),
+            agent=str(data["agent"]),
+            timestamp=str(data["timestamp"]),
+            body=body.strip(),
+            kind=_optional_str(data.get("kind")),
+            source=_optional_str(data.get("source")),
+            title=_optional_str(data.get("title")),
+            url=_optional_str(data.get("url")),
+        )
+    except KeyError as exc:
+        raise RevisError(f"Missing required finding field {exc.args[0]!r}: {path}") from exc
+
+
+def _split_frontmatter(content: str, *, path: Path) -> tuple[str, str]:
+    """Split a markdown document into YAML frontmatter and body."""
+
+    if not content.startswith("---\n"):
+        raise RevisError(f"Invalid finding: {path}")
+    try:
+        _, frontmatter, body = content.split("---\n", 2)
+    except ValueError as exc:
+        raise RevisError(f"Invalid finding: {path}") from exc
+    return frontmatter, body
+
+
+def _optional_str(value: object) -> str | None:
+    """Normalize optional frontmatter scalars into strings."""
+
+    if value is None:
+        return None
+    return str(value)

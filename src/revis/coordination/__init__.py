@@ -1,1 +1,1 @@
-"""Git-backed coordination, daemon, and runtime helpers."""
+"""Coordination helpers for bootstrapping, findings, sync, promotion, and runtime."""

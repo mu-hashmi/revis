@@ -11,14 +11,23 @@ from pathlib import Path
 from daytona import CreateSandboxFromImageParams, Daytona, DaytonaNotFoundError, Image
 
 from revis import __version__
-from revis.core.config import CONFIG_PATH
 from revis.agent.credentials import copy_codex_auth, daytona_agent_env, template_executable
-from revis.coordination.git import credential_store_entry, local_git_credentials, normalize_http_remote, remote_url
-from revis.agent.instructions import install_sandbox_instructions, render_startup_prompt, revis_ignore_patterns
+from revis.agent.instructions import (
+    install_sandbox_instructions,
+    render_startup_prompt,
+    revis_ignore_patterns,
+)
+from revis.coordination.repo import (
+    credential_store_entry,
+    local_git_credentials,
+    normalize_http_remote,
+    remote_url,
+)
+from revis.core.config import CONFIG_PATH
 from revis.core.models import AgentRuntimeRecord, AgentState, AgentType, SandboxHandle
-from revis.sandbox.base import SandboxProvider
 from revis.coordination.sandbox_meta import write_sandbox_meta
 from revis.core.util import RevisError, shell_join, substitute_argv, temp_dir
+from revis.sandbox.base import SandboxProvider
 
 
 class DaytonaSandboxProvider(SandboxProvider):
@@ -61,6 +70,7 @@ class DaytonaSandboxProvider(SandboxProvider):
         repo_remote = remote_url(self.project_root, self.config.coordination_remote)
         clone_remote = normalize_http_remote(repo_remote)
         git_username, git_password = local_git_credentials(repo_remote)
+
         try:
             # Provision the remote sandbox first.
             sandbox = self.client.create(
@@ -91,7 +101,9 @@ class DaytonaSandboxProvider(SandboxProvider):
                 # match the CLI config and protocol text exactly.
                 self._exec_checked(
                     sandbox,
-                    shell_join(["git", "remote", "rename", "origin", self.config.coordination_remote]),
+                    shell_join(
+                        ["git", "remote", "rename", "origin", self.config.coordination_remote]
+                    ),
                     cwd=remote_repo,
                     timeout=30,
                 )
@@ -152,7 +164,11 @@ class DaytonaSandboxProvider(SandboxProvider):
                 agent_id=agent_id,
                 agent_type=agent_type,
             )
-            self._exec_checked(sandbox, shell_join(["tmux", "has-session", "-t", session_name]), timeout=30)
+            self._exec_checked(
+                sandbox,
+                shell_join(["tmux", "has-session", "-t", session_name]),
+                timeout=30,
+            )
             ssh = sandbox.create_ssh_access(expires_in_minutes=24 * 60)
             attach_shell = f"{ssh.ssh_command} -t {shlex.quote(f'tmux attach -t {session_name}')}"
             return SandboxHandle(
@@ -197,7 +213,11 @@ class DaytonaSandboxProvider(SandboxProvider):
         sandbox.refresh_data()
         record.workspace_url = self._workspace_url(sandbox.id)
         repo = sandbox.get_work_dir().rstrip("/") + "/repo"
-        tmux_session = sandbox.process.exec(f"tmux has-session -t revis-{record.agent_id}", cwd=repo, timeout=10)
+        tmux_session = sandbox.process.exec(
+            f"tmux has-session -t revis-{record.agent_id}",
+            cwd=repo,
+            timeout=10,
+        )
         sandbox_state = str(sandbox.state).lower()
         # A running workspace without the tmux session is still a failed agent
         # from Revis's perspective: the coordination daemon and Codex process are
@@ -211,13 +231,21 @@ class DaytonaSandboxProvider(SandboxProvider):
             record.state = AgentState.STOPPED
         else:
             record.state = AgentState.FAILED
-            record.last_error = sandbox.error_reason or tmux_session.result.strip() or f"tmux session missing in {sandbox.name}"
+            record.last_error = (
+                sandbox.error_reason
+                or tmux_session.result.strip()
+                or f"tmux session missing in {sandbox.name}"
+            )
 
         # Pull daemon-produced heartbeat and conflict markers from the repo.
         heartbeat = sandbox.process.exec("cat .revis/last-daemon-sync", cwd=repo, timeout=10)
         if heartbeat.exit_code == 0 and heartbeat.result.strip():
             record.last_heartbeat = heartbeat.result.strip().splitlines()[-1]
-        conflict = sandbox.process.exec("test -f .revis/sync-conflict && cat .revis/sync-conflict", cwd=repo, timeout=10)
+        conflict = sandbox.process.exec(
+            "test -f .revis/sync-conflict && cat .revis/sync-conflict",
+            cwd=repo,
+            timeout=10,
+        )
         if conflict.exit_code == 0 and conflict.result.strip():
             record.conflict_path = ".revis/sync-conflict"
         else:
@@ -327,12 +355,18 @@ class DaytonaSandboxProvider(SandboxProvider):
             password: Git password or token.
         """
         # Upload the credential store file first.
-        self._exec_checked(sandbox, shell_join(["mkdir", "-p", f"{remote_repo}/.git"]), timeout=30)
+        self._exec_checked(
+            sandbox,
+            shell_join(["mkdir", "-p", f"{remote_repo}/.git"]),
+            timeout=30,
+        )
         with temp_dir("revis-daytona-git-") as temp_root:
             # Keep credentials scoped to the clone so deleting the repo also
             # deletes the token material; the sandbox image stays stateless.
             credentials_path = temp_root / "git-credentials"
-            credentials_path.write_text(credential_store_entry(remote, username=username, password=password) + "\n")
+            credentials_path.write_text(
+                credential_store_entry(remote, username=username, password=password) + "\n"
+            )
             sandbox.fs.upload_file(str(credentials_path), f"{remote_repo}/.git/.revis-credentials")
 
         # Point git at the repo-local credential store.
@@ -375,7 +409,10 @@ class DaytonaSandboxProvider(SandboxProvider):
         with temp_dir("revis-daytona-bootstrap-") as temp_root:
             # Render the same bootstrap files local sandboxes receive.
             (temp_root / ".revis").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.project_root / CONFIG_PATH, temp_root / ".revis" / "config.toml")
+            shutil.copy2(
+                self.project_root / CONFIG_PATH,
+                temp_root / ".revis" / "config.toml",
+            )
             write_sandbox_meta(
                 temp_root,
                 agent_id=agent_id,
@@ -412,7 +449,11 @@ class DaytonaSandboxProvider(SandboxProvider):
             remote_repo: Remote repo path inside the sandbox.
         """
         lines = "\n".join(revis_ignore_patterns())
-        command = f"mkdir -p {shlex.quote(remote_repo + '/.git/info')} && cat >> {shlex.quote(remote_repo + '/.git/info/exclude')} <<'EOF'\n{lines}\nEOF"
+        command = (
+            f"mkdir -p {shlex.quote(remote_repo + '/.git/info')} && "
+            f"cat >> {shlex.quote(remote_repo + '/.git/info/exclude')} <<'EOF'\n"
+            f"{lines}\nEOF"
+        )
         self._exec_checked(sandbox, command, timeout=30)
 
     def _install_revis(self, sandbox, *, remote_repo: str) -> None:
@@ -438,7 +479,11 @@ class DaytonaSandboxProvider(SandboxProvider):
                 timeout=300,
             )
         else:
-            self._exec_checked(sandbox, f"{shlex.quote(venv_dir)}/bin/python -m pip install -q revis=={__version__}", timeout=300)
+            self._exec_checked(
+                sandbox,
+                f"{shlex.quote(venv_dir)}/bin/python -m pip install -q revis=={__version__}",
+                timeout=300,
+            )
 
         # Expose `revis` on PATH for both the daemon and any attached shell.
         self._exec_checked(
@@ -447,7 +492,15 @@ class DaytonaSandboxProvider(SandboxProvider):
             timeout=30,
         )
 
-    def _start_remote_tmux(self, sandbox, *, remote_repo: str, session_name: str, agent_id: str, agent_type: AgentType) -> None:
+    def _start_remote_tmux(
+        self,
+        sandbox,
+        *,
+        remote_repo: str,
+        session_name: str,
+        agent_id: str,
+        agent_type: AgentType,
+    ) -> None:
         """Start Codex and the Revis daemon in tmux windows inside the sandbox.
 
         Args:
@@ -485,10 +538,16 @@ class DaytonaSandboxProvider(SandboxProvider):
         # Start the agent window first, then add the daemon beside it.
         self._exec_checked(
             sandbox,
-            shell_join(["tmux", "new-session", "-d", "-s", session_name, "-c", remote_repo, agent_command]),
+            shell_join(
+                ["tmux", "new-session", "-d", "-s", session_name, "-c", remote_repo, agent_command]
+            ),
             timeout=60,
         )
-        self._exec_checked(sandbox, shell_join(["tmux", "rename-window", "-t", f"{session_name}:0", "agent"]), timeout=30)
+        self._exec_checked(
+            sandbox,
+            shell_join(["tmux", "rename-window", "-t", f"{session_name}:0", "agent"]),
+            timeout=30,
+        )
         daemon_command = shell_join([f"{venv_bin}/python", "-m", "revis", "_daemon-run"])
         # Keep daemon output in its own window so attaching to Codex does not
         # bury the sync loop that keeps findings and rebases up to date.

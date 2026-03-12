@@ -7,9 +7,16 @@ from pathlib import Path
 
 from revis.core.config import load_config
 from revis.coordination.findings import write_dashboard_files
-from revis.coordination.git import read_findings, sync_target_branch, try_sync_branch
-from revis.coordination.runtime import append_event, append_metric, load_agent_record, write_agent_record
+from revis.coordination.ledger import read_findings
+from revis.coordination.runtime import (
+    append_event,
+    append_metric,
+    load_agent_record,
+    write_agent_record,
+)
 from revis.coordination.sandbox_meta import load_sandbox_meta
+from revis.coordination.sync import sync_target_branch, try_sync_branch
+from revis.core.models import RevisConfig
 from revis.core.util import iso_now
 
 
@@ -78,7 +85,10 @@ def run_daemon_cycle(repo: Path) -> None:
 
     project_root = Path(meta["project_root"]) if meta.get("project_root") else None
     agent_id = meta["agent_id"]
-    branch = sync_target_branch(remote_name=config.coordination_remote, base_branch=config.trunk_base)
+    branch = sync_target_branch(
+        remote_name=config.coordination_remote,
+        base_branch=config.trunk_base,
+    )
 
     # Refresh the sandbox branch and update the heartbeat marker.
     ok, result = try_sync_branch(
@@ -89,41 +99,66 @@ def run_daemon_cycle(repo: Path) -> None:
     )
     timestamp = iso_now()
     heartbeat_path(repo).write_text(timestamp + "\n")
+    _mirror_daemon_outcome(
+        repo=repo,
+        project_root=project_root,
+        agent_id=agent_id,
+        config=config,
+        timestamp=timestamp,
+        ok=ok,
+        result=result,
+    )
 
-    if project_root:
-        # Mirror the daemon outcome back into host-side runtime files.
-        # Only local sandboxes know the host project root. Daytona still keeps
-        # its sandbox-local heartbeat files, but it cannot mirror runtime state
-        # back onto the operator's filesystem.
-        record = load_agent_record(project_root, agent_id)
-        if record:
-            record.last_heartbeat = timestamp
-            record.last_sync_at = timestamp
-            record.last_sync_result = result
-            record.conflict_path = str(conflict_path(repo)) if conflict_path(repo).exists() else None
-            write_agent_record(project_root, record)
-            append_event(
-                project_root,
-                {
-                    "timestamp": timestamp,
-                    "type": "daemon_sync",
-                    "agent_id": agent_id,
-                    "status": result,
-                },
-                retention_entries=config.retention.max_event_entries,
-                retention_bytes=config.retention.max_event_bytes,
-                retention_archives=config.retention.max_event_archives,
-            )
-            append_metric(
-                project_root,
-                agent_id,
-                {
-                    "timestamp": timestamp,
-                    "sync_ok": ok,
-                    "last_sync_result": result,
-                },
-                max_points=config.retention.max_metric_points,
-            )
+
+def _mirror_daemon_outcome(
+    *,
+    repo: Path,
+    project_root: Path | None,
+    agent_id: str,
+    config: RevisConfig,
+    timestamp: str,
+    ok: bool,
+    result: str,
+) -> None:
+    """Mirror one daemon sync result into host-side runtime artifacts."""
+
+    if project_root is None:
+        return
+
+    # Only local sandboxes know the host project root. Daytona still keeps its
+    # sandbox-local heartbeat files, but it cannot mirror runtime state back
+    # onto the operator's filesystem.
+    conflict_marker = conflict_path(repo)
+    record = load_agent_record(project_root, agent_id)
+    if record:
+        record.last_heartbeat = timestamp
+        record.last_sync_at = timestamp
+        record.last_sync_result = result
+        record.conflict_path = str(conflict_marker) if conflict_marker.exists() else None
+        write_agent_record(project_root, record)
+
+    append_event(
+        project_root,
+        {
+            "timestamp": timestamp,
+            "type": "daemon_sync",
+            "agent_id": agent_id,
+            "status": result,
+        },
+        retention_entries=config.retention.max_event_entries,
+        retention_bytes=config.retention.max_event_bytes,
+        retention_archives=config.retention.max_event_archives,
+    )
+    append_metric(
+        project_root,
+        agent_id,
+        {
+            "timestamp": timestamp,
+            "sync_ok": ok,
+            "last_sync_result": result,
+        },
+        max_points=config.retention.max_metric_points,
+    )
 
 
 def run_daemon_loop(repo: Path) -> None:
@@ -146,15 +181,24 @@ def run_daemon_loop(repo: Path) -> None:
             # error. The failure is surfaced through repo-local and host-local
             # runtime artifacts instead.
             append_daemon_log(repo, f"cycle failed: {exc}")
-            try:
-                meta = load_sandbox_meta(repo)
-                project_root = Path(meta["project_root"]) if meta.get("project_root") else None
-                if project_root:
-                    # Persist the last daemon failure into host-side runtime state.
-                    record = load_agent_record(project_root, meta["agent_id"])
-                    if record:
-                        record.last_error = str(exc)
-                        write_agent_record(project_root, record)
-            except Exception as nested_exc:
-                append_daemon_log(repo, f"failed to persist runtime error: {nested_exc}")
+            _persist_daemon_failure(repo, exc)
         time.sleep(interval_seconds)
+
+
+def _persist_daemon_failure(repo: Path, exc: Exception) -> None:
+    """Persist the last daemon failure into host-side runtime state when possible."""
+
+    try:
+        meta = load_sandbox_meta(repo)
+        project_root = Path(meta["project_root"]) if meta.get("project_root") else None
+        if project_root is None:
+            return
+
+        # Local sandboxes can surface daemon failures in `status` without
+        # attaching because they share the host-side runtime directory.
+        record = load_agent_record(project_root, meta["agent_id"])
+        if record:
+            record.last_error = str(exc)
+            write_agent_record(project_root, record)
+    except Exception as nested_exc:
+        append_daemon_log(repo, f"failed to persist runtime error: {nested_exc}")
