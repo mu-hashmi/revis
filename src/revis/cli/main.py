@@ -40,6 +40,7 @@ from revis.coordination.repo import (
     uses_managed_trunk,
     working_tree_dirty,
 )
+from revis.coordination.report import write_session_report
 from revis.coordination.runtime import (
     append_event,
     load_all_agent_records,
@@ -250,6 +251,7 @@ def log(
         root,
         remote_name=config.coordination_remote,
         agent_id=meta["agent_id"],
+        session_id=sandbox_session_id(meta),
         message=message,
         kind=kind,
         source=source,
@@ -292,6 +294,23 @@ def findings(
         entries, since=since, agent=agent, last=last, kind=kind, source=source
     )
     console.print(render_findings(filtered))
+
+
+@app.command()
+def report(
+    session: str | None = typer.Option(None, "--session"),
+    output: Path | None = typer.Option(None, "--output"),
+) -> None:
+    """Write a raw markdown report for one Revis session."""
+    root = resolve_repo_root(Path.cwd())
+    config = load_config(root)
+    target = write_session_report(
+        root,
+        remote_name=config.coordination_remote,
+        output_path=output,
+        session_id=session,
+    )
+    console.print(str(target))
 
 
 @app.command()
@@ -375,6 +394,7 @@ def promote() -> None:
         root,
         remote_name=config.coordination_remote,
         agent_id=meta["agent_id"],
+        session_id=sandbox_session_id(meta),
         message=message,
         kind="promotion",
         source=None,
@@ -554,6 +574,17 @@ def summarize_starting_direction(value: str | None) -> str:
     if not value:
         return "-"
     return shorten(value, width=32, placeholder="...")
+
+
+def sandbox_session_id(meta: dict[str, str]) -> str:
+    """Return the sandbox session ID or fail with a migration error."""
+
+    session_id = meta.get("session_id")
+    if session_id is None:
+        raise RevisError(
+            "Sandbox metadata is missing `session_id`. Respawn this agent before logging findings or promoting changes."
+        )
+    return session_id
 
 
 def load_objective_text(root: Path, config: RevisConfig) -> str:

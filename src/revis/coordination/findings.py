@@ -17,6 +17,7 @@ def filter_findings(
     last: int | None = None,
     kind: str | None = None,
     source: str | None = None,
+    session_id: str | None = None,
 ) -> list[FindingEntry]:
     """Filter findings by the supported CLI query fields.
 
@@ -27,6 +28,7 @@ def filter_findings(
         last: Optional maximum number of results to keep.
         kind: Optional finding kind filter.
         source: Optional source identifier filter.
+        session_id: Optional exact session identifier filter.
 
     Returns:
         list[FindingEntry]: Filtered findings, preserving input order.
@@ -49,6 +51,8 @@ def filter_findings(
         filtered = [entry for entry in filtered if entry.kind == kind]
     if source:
         filtered = [entry for entry in filtered if entry.source == source]
+    if session_id is not None:
+        filtered = [entry for entry in filtered if entry.session_id == session_id]
 
     # Trim the result set only after all other filters have run.
     if last is not None:

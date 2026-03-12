@@ -47,6 +47,7 @@ class DaytonaSandboxProvider(SandboxProvider):
         self,
         *,
         agent_id: str,
+        session_id: str,
         agent_type: AgentType,
         objective_text: str,
         protocol_objective_text: str,
@@ -56,6 +57,7 @@ class DaytonaSandboxProvider(SandboxProvider):
 
         Args:
             agent_id: Stable Revis agent identifier.
+            session_id: Stable Revis session identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
             protocol_objective_text: Shared research objective text.
@@ -148,6 +150,7 @@ class DaytonaSandboxProvider(SandboxProvider):
                 sandbox=sandbox,
                 remote_repo=remote_repo,
                 agent_id=agent_id,
+                session_id=session_id,
                 agent_type=agent_type,
                 objective_text=objective_text,
                 protocol_objective_text=protocol_objective_text,
@@ -392,6 +395,7 @@ class DaytonaSandboxProvider(SandboxProvider):
         sandbox,
         remote_repo: str,
         agent_id: str,
+        session_id: str,
         agent_type: AgentType,
         objective_text: str,
         protocol_objective_text: str,
@@ -402,6 +406,7 @@ class DaytonaSandboxProvider(SandboxProvider):
             sandbox: Daytona sandbox handle.
             remote_repo: Remote repo path inside the sandbox.
             agent_id: Stable Revis agent identifier.
+            session_id: Stable Revis session identifier.
             agent_type: Agent type running in the sandbox.
             objective_text: Effective research objective text.
             protocol_objective_text: Shared research objective text.
@@ -416,6 +421,7 @@ class DaytonaSandboxProvider(SandboxProvider):
             write_sandbox_meta(
                 temp_root,
                 agent_id=agent_id,
+                session_id=session_id,
                 agent_type=agent_type,
                 provider=self.config.provider,
                 project_root=None,

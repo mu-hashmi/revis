@@ -79,7 +79,12 @@ def spawn_planned_agents(
 ) -> list[AgentRuntimeRecord]:
     """Spawn a planned batch of agents and persist their runtime state."""
 
-    _ensure_runtime_registry(root, config=config, objective_text=objective_text)
+    registry = _ensure_runtime_registry(
+        root,
+        config=config,
+        objective_text=objective_text,
+        resume=resume,
+    )
 
     spawned: list[AgentRuntimeRecord] = []
 
@@ -99,6 +104,7 @@ def spawn_planned_agents(
             provider=config.provider,
             state=AgentState.STARTING,
             branch=plan.branch,
+            session_id=registry.swarm_id,
             started_at=iso_now(),
             sandbox_path_or_id="",
             starting_direction=starting_direction,
@@ -108,6 +114,7 @@ def spawn_planned_agents(
         try:
             handle = provider.spawn(
                 agent_id=plan.agent_id,
+                session_id=registry.swarm_id,
                 agent_type=plan.agent_type,
                 objective_text=effective_objective,
                 protocol_objective_text=objective_text,
@@ -152,11 +159,28 @@ def spawn_planned_agents(
     return spawned
 
 
-def _ensure_runtime_registry(root: Path, *, config: RevisConfig, objective_text: str) -> None:
-    """Create the swarm registry on the first spawn for a project."""
+def _ensure_runtime_registry(
+    root: Path,
+    *,
+    config: RevisConfig,
+    objective_text: str,
+    resume: bool,
+) -> RuntimeRegistry:
+    """Return the active runtime registry for this spawn batch.
 
-    if load_registry(root) is not None:
-        return
+    Args:
+        root: Repository root.
+        config: Loaded Revis project configuration.
+        objective_text: Effective objective text for the swarm.
+        resume: Whether the current spawn should continue the prior session.
+
+    Returns:
+        RuntimeRegistry: Active session registry for the spawn batch.
+    """
+
+    existing = load_registry(root)
+    if resume and existing is not None:
+        return existing
 
     registry = RuntimeRegistry(
         swarm_id=uuid.uuid4().hex[:12],
@@ -168,6 +192,8 @@ def _ensure_runtime_registry(root: Path, *, config: RevisConfig, objective_text:
             base_branch=config.trunk_base,
         ),
         findings_branch=FINDINGS_BRANCH,
+        coordination_remote=config.coordination_remote,
         config_path=str(root / CONFIG_PATH),
     )
     write_registry(root, registry)
+    return registry

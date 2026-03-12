@@ -95,6 +95,31 @@ def registry_path(root: Path) -> Path:
     return runtime_dir(root) / "registry.toml"
 
 
+def sessions_dir(root: Path) -> Path:
+    """Return the directory containing historical session registries.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Path: Runtime sessions directory.
+    """
+    return runtime_dir(root) / "sessions"
+
+
+def session_registry_path(root: Path, session_id: str) -> Path:
+    """Return the persisted registry path for one session.
+
+    Args:
+        root: Repository root.
+        session_id: Stable Revis session identifier.
+
+    Returns:
+        Path: Historical session registry path.
+    """
+    return sessions_dir(root) / f"{session_id}.toml"
+
+
 def agent_path(root: Path, agent_id: str) -> Path:
     """Return the runtime record path for one agent.
 
@@ -128,7 +153,10 @@ def write_registry(root: Path, registry: RuntimeRegistry) -> None:
         registry: Swarm-level runtime metadata to write.
     """
     ensure_runtime(root)
-    registry_path(root).write_text(tomli_w.dumps(_compact(asdict(registry))))
+    payload = tomli_w.dumps(_compact(asdict(registry)))
+    registry_path(root).write_text(payload)
+    ensure_dir(sessions_dir(root))
+    session_registry_path(root, registry.swarm_id).write_text(payload)
 
 
 def load_registry(root: Path) -> RuntimeRegistry | None:
@@ -144,6 +172,34 @@ def load_registry(root: Path) -> RuntimeRegistry | None:
     if not path.exists():
         return None
     data = tomllib.loads(path.read_text())
+    return _decode_registry(data)
+
+
+def load_session_registry(root: Path, session_id: str) -> RuntimeRegistry | None:
+    """Load one persisted session registry by session ID.
+
+    Args:
+        root: Repository root.
+        session_id: Stable Revis session identifier.
+
+    Returns:
+        RuntimeRegistry | None: Parsed registry when present.
+    """
+    path = session_registry_path(root, session_id)
+    if not path.exists():
+        return None
+    return _decode_registry(tomllib.loads(path.read_text()))
+
+
+def _decode_registry(data: dict[str, object]) -> RuntimeRegistry:
+    """Decode TOML data into a `RuntimeRegistry`.
+
+    Args:
+        data: Parsed TOML mapping.
+
+    Returns:
+        RuntimeRegistry: Decoded runtime registry.
+    """
     return RuntimeRegistry(
         swarm_id=data["swarm_id"],
         provider=SandboxProvider(data["provider"]),
@@ -151,6 +207,7 @@ def load_registry(root: Path) -> RuntimeRegistry | None:
         objective_hash=data["objective_hash"],
         trunk_branch=data["trunk_branch"],
         findings_branch=data["findings_branch"],
+        coordination_remote=data.get("coordination_remote"),
         config_path=data["config_path"],
     )
 
@@ -207,12 +264,15 @@ def _decode_agent_record(data: dict[str, object]) -> AgentRuntimeRecord:
     Returns:
         AgentRuntimeRecord: Decoded runtime record.
     """
+    session_id = data.get("session_id")
+
     return AgentRuntimeRecord(
         agent_id=str(data["agent_id"]),
         agent_type=AgentType(str(data["agent_type"])),
         provider=SandboxProvider(str(data["provider"])),
         state=AgentState(str(data["state"])),
         branch=str(data["branch"]),
+        session_id=str(session_id) if session_id is not None else None,
         started_at=str(data["started_at"]),
         sandbox_path_or_id=str(data["sandbox_path_or_id"]),
         last_heartbeat=data.get("last_heartbeat"),

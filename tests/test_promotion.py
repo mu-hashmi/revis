@@ -90,6 +90,7 @@ def test_cli_promote_remote_pr_flow_pushes_branch_and_logs_promotion(
     remote_path = create_bare_remote(tmp_path / "origin.git")
     root = tmp_path / "project"
     config = bootstrap_origin_project(root, remote_path)
+    session_id = "session-test"
 
     run_cmd(["git", "checkout", "-b", "revis/codex-1/work"], cwd=root)
     (root / "feature.txt").write_text("candidate change\n")
@@ -99,6 +100,7 @@ def test_cli_promote_remote_pr_flow_pushes_branch_and_logs_promotion(
     write_sandbox_meta(
         root,
         agent_id="codex-1",
+        session_id=session_id,
         agent_type=config.default_agent,
         provider=config.provider,
         project_root=str(root),
@@ -107,6 +109,7 @@ def test_cli_promote_remote_pr_flow_pushes_branch_and_logs_promotion(
         root,
         remote_name="origin",
         agent_id="codex-1",
+        session_id=session_id,
         message="Result body",
         kind="result",
         source=None,

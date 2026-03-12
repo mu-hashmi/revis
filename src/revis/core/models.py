@@ -159,6 +159,7 @@ class AgentRuntimeRecord:
         branch: Agent work branch name.
         started_at: ISO-8601 timestamp when the agent was created.
         sandbox_path_or_id: Local path or provider-specific sandbox identifier.
+        session_id: Session identifier for the spawn batch that owns the agent.
         last_heartbeat: Latest daemon heartbeat timestamp.
         last_sync_at: Latest daemon sync timestamp.
         last_sync_result: Summary of the latest sync attempt.
@@ -183,6 +184,7 @@ class AgentRuntimeRecord:
     branch: str
     started_at: str
     sandbox_path_or_id: str
+    session_id: str | None = None
     last_heartbeat: str | None = None
     last_sync_at: str | None = None
     last_sync_result: str | None = None
@@ -212,6 +214,7 @@ class RuntimeRegistry:
         trunk_branch: Active sync target branch for the current provider.
         findings_branch: Shared findings branch name.
         config_path: Absolute path to the project config file.
+        coordination_remote: Git remote name backing findings/sync/promotion.
     """
 
     swarm_id: str
@@ -221,6 +224,7 @@ class RuntimeRegistry:
     trunk_branch: str
     findings_branch: str
     config_path: str
+    coordination_remote: str | None = None
 
 
 @dataclass(slots=True)
@@ -230,6 +234,7 @@ class FindingEntry:
     Attributes:
         path: Repository path of the markdown finding file.
         agent: Agent identifier that wrote the finding.
+        session_id: Session identifier stamped when the finding was logged.
         timestamp: ISO-8601 timestamp from finding frontmatter.
         body: Free-form markdown body.
         kind: Optional finding category.
@@ -240,6 +245,7 @@ class FindingEntry:
 
     path: str
     agent: str
+    session_id: str | None
     timestamp: str
     body: str
     kind: str | None = None

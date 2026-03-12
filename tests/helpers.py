@@ -192,6 +192,7 @@ def write_runtime_state(
         trunk_branch=config.trunk_base if config.coordination_remote == "origin" else "revis/trunk",
         findings_branch="revis/findings",
         config_path=str(root / ".revis" / "config.toml"),
+        coordination_remote=config.coordination_remote,
     )
     write_registry(root, registry)
     write_agent_record(root, record)
@@ -205,6 +206,7 @@ def make_agent_record(
     state: AgentState = AgentState.ACTIVE,
     branch: str = "revis/codex-1/work",
     sandbox_path_or_id: str = "sandbox-id",
+    session_id: str | None = "swarm-test",
     attach_cmd: list[str] | None = None,
     attach_label: str | None = None,
     workspace_url: str | None = None,
@@ -217,6 +219,7 @@ def make_agent_record(
         provider=provider,
         state=state,
         branch=branch,
+        session_id=session_id,
         started_at=iso_now(),
         sandbox_path_or_id=sandbox_path_or_id,
         attach_cmd=attach_cmd or [],
@@ -239,6 +242,7 @@ class FakeProvider:
         self,
         *,
         agent_id: str,
+        session_id: str,
         agent_type: AgentType,
         objective_text: str,
         protocol_objective_text: str,
@@ -250,6 +254,7 @@ class FakeProvider:
         del objective_text
         del protocol_objective_text
         del resume
+        del session_id
 
         if self.spawn_error is not None:
             raise self.spawn_error

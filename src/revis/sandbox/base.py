@@ -31,6 +31,7 @@ class SandboxProvider(ABC):
         self,
         *,
         agent_id: str,
+        session_id: str,
         agent_type: AgentType,
         objective_text: str,
         protocol_objective_text: str,
@@ -40,6 +41,7 @@ class SandboxProvider(ABC):
 
         Args:
             agent_id: Stable Revis agent identifier.
+            session_id: Stable Revis session identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
             protocol_objective_text: Shared research objective text.

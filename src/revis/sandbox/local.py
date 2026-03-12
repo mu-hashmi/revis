@@ -31,6 +31,7 @@ class LocalSandboxProvider(SandboxProvider):
         self,
         *,
         agent_id: str,
+        session_id: str,
         agent_type: AgentType,
         objective_text: str,
         protocol_objective_text: str,
@@ -40,6 +41,7 @@ class LocalSandboxProvider(SandboxProvider):
 
         Args:
             agent_id: Stable Revis agent identifier.
+            session_id: Stable Revis session identifier.
             agent_type: Agent type to launch.
             objective_text: Effective research objective text.
             protocol_objective_text: Shared research objective text.
@@ -86,6 +88,7 @@ class LocalSandboxProvider(SandboxProvider):
             write_sandbox_meta(
                 repo,
                 agent_id=agent_id,
+                session_id=session_id,
                 agent_type=agent_type,
                 provider=self.config.provider,
                 project_root=str(self.project_root),

@@ -18,6 +18,7 @@ def write_findings_entry(
     *,
     remote_name: str,
     agent_id: str,
+    session_id: str | None = None,
     message: str,
     kind: str | None,
     source: str | None,
@@ -31,13 +32,19 @@ def write_findings_entry(
 
         # Timestamped filenames keep the ledger append-only and make raw branch
         # inspection readable even before frontmatter is parsed.
-        filename = timestamp.replace(":", "-") + f"-{agent_id}.md"
+        # Findings use second-precision timestamps in frontmatter, so add a
+        # short nonce to filenames to keep same-agent bursts append-only.
+        filename = (
+            timestamp.replace(":", "-")
+            + f"-{random.randrange(0, 1_000_000):06d}-{agent_id}.md"
+        )
 
         # Build the markdown finding payload.
         frontmatter = {
             key: value
             for key, value in {
                 "agent": agent_id,
+                "session_id": session_id,
                 "timestamp": timestamp,
                 "kind": kind,
                 "source": source,
@@ -104,13 +111,6 @@ def _retry_backoff_seconds(attempt: int) -> float:
     return random.uniform(capped / 2, capped * 1.5)
 
 
-def fetch_findings_tree(repo: Path, *, remote_name: str) -> list[Path]:
-    """Return finding file paths from a temporary findings worktree."""
-
-    with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
-        return sorted((worktree / "findings").glob("*.md"))
-
-
 def read_findings(repo: Path, *, remote_name: str) -> list[FindingEntry]:
     """Read and sort all findings from newest to oldest."""
 
@@ -139,6 +139,7 @@ def parse_finding(path: Path) -> FindingEntry:
         return FindingEntry(
             path=str(path),
             agent=str(data["agent"]),
+            session_id=_optional_str(data.get("session_id")),
             timestamp=str(data["timestamp"]),
             body=body.strip(),
             kind=_optional_str(data.get("kind")),

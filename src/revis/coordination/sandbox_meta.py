@@ -18,6 +18,7 @@ def write_sandbox_meta(
     root: Path,
     *,
     agent_id: str,
+    session_id: str | None = None,
     agent_type: AgentType,
     provider: SandboxProvider,
     project_root: str | None = None,
@@ -27,6 +28,7 @@ def write_sandbox_meta(
     Args:
         root: Sandbox repo root.
         agent_id: Stable Revis agent identifier.
+        session_id: Stable Revis session identifier.
         agent_type: Agent type running in the sandbox.
         provider: Sandbox provider backing the sandbox.
         project_root: Optional original project root used for local runtime
@@ -37,16 +39,16 @@ def write_sandbox_meta(
     """
     path = root / META_PATH
     ensure_dir(path.parent)
-    path.write_text(
-        tomli_w.dumps(
-            {
-                "agent_id": agent_id,
-                "agent_type": agent_type.value,
-                "provider": provider.value,
-                **({"project_root": project_root} if project_root else {}),
-            }
-        )
-    )
+    payload = {
+        "agent_id": agent_id,
+        "agent_type": agent_type.value,
+        "provider": provider.value,
+    }
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if project_root is not None:
+        payload["project_root"] = project_root
+    path.write_text(tomli_w.dumps(payload))
     return path
 
 
