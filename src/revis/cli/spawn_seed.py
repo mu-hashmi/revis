@@ -77,6 +77,7 @@ class SpawnSeedApp(App[dict[str, str | None]]):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Populate the initial labels before focusing the agent list.
         self._refresh_labels()
         self._sync_editor()
         self.query_one("#agents", ListView).focus()
@@ -118,6 +119,8 @@ class SpawnSeedApp(App[dict[str, str | None]]):
 
     def _sync_editor(self) -> None:
         draft = self._current_draft()
+
+        # Show the selected agent and its current seed value.
         self.query_one("#title", Static).update(f"Agent: {draft.agent_id}")
         if draft.starting_direction:
             summary = f"Current starting direction: {draft.starting_direction}"
@@ -126,11 +129,15 @@ class SpawnSeedApp(App[dict[str, str | None]]):
         self.query_one("#summary", Static).update(summary)
         input_widget = self.query_one("#seed-input", Input)
         input_widget.value = draft.starting_direction or ""
+
+        # Refresh the overall progress indicator.
         status = self._status_text()
         self.query_one("#status", Static).update(status)
 
     def _refresh_labels(self) -> None:
         for draft in self.drafts:
+            # Distinguish "skipped" from "pending" so a blank direction is an
+            # explicit decision rather than missing operator input.
             if draft.starting_direction:
                 state = "seeded"
             elif draft.visited:
@@ -148,10 +155,14 @@ class SpawnSeedApp(App[dict[str, str | None]]):
 
     def _save_current(self) -> None:
         draft = self._current_draft()
+
+        # Persist the current input onto the selected draft.
         value = self.query_one("#seed-input", Input).value.strip()
         draft.starting_direction = value or None
         draft.visited = True
         self._refresh_labels()
+        # Jump to the next unfinished agent instead of the next row so the
+        # operator can move around freely without re-editing completed entries.
         next_index = self._next_unvisited_index(after=self._current_index())
         if next_index is None:
             self.exit(
@@ -161,6 +172,8 @@ class SpawnSeedApp(App[dict[str, str | None]]):
                 }
             )
             return
+
+        # Advance the selection and reopen the editor on the next unfinished agent.
         list_view = self.query_one("#agents", ListView)
         list_view.index = next_index
         self._sync_editor()

@@ -78,6 +78,9 @@ def write_shared_protocol(
 
     revis_dir = ensure_dir(root / ".revis")
     (revis_dir / "objective.md").write_text(objective_text)
+    # `objective.md` may diverge per agent once seeded directions are applied,
+    # but the protocol file stays shared so the coordination rules remain
+    # identical across the swarm.
     (revis_dir / "protocol.md").write_text(
         protocol_body(
             objective_text=protocol_objective_text,
@@ -155,6 +158,9 @@ def write_codex_home_config(codex_home: Path, *, trusted_project_path: str) -> N
     """
 
     config_path = codex_home / "config.toml"
+    # Inherit the user's existing Codex defaults so sandbox behavior matches the
+    # host as closely as possible, then add trust for the sandbox worktree's
+    # distinct path.
     base = LOCAL_CODEX_CONFIG_PATH.read_text() if LOCAL_CODEX_CONFIG_PATH.exists() else ""
     suffix = "" if not base or base.endswith("\n") else "\n"
     config_path.write_text(base + suffix + f'[projects."{trusted_project_path}"]\ntrust_level = "trusted"\n')
@@ -184,6 +190,8 @@ def upsert_bootstrap(path: Path, *, skill_ref: str) -> None:
         return
     content = path.read_text()
     if REVIS_BLOCK_START in content and REVIS_BLOCK_END in content:
+        # Replace only the Revis-owned region so any surrounding user-authored
+        # AGENTS guidance survives repeated spawns untouched.
         start = content.index(REVIS_BLOCK_START)
         end = content.index(REVIS_BLOCK_END) + len(REVIS_BLOCK_END)
         path.write_text(content[:start].rstrip() + "\n\n" + block + "\n")

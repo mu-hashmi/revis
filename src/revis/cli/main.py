@@ -92,6 +92,7 @@ def version() -> None:
 @app.command()
 def init() -> None:
     """Interactively initialize Revis in the current repository."""
+    # Resolve the target repository and gather the operator's choices.
     root = Path.cwd()
     if not is_git_repo(root):
         raise typer.BadParameter(
@@ -108,6 +109,8 @@ def init() -> None:
     objective = parse_objective(root, objective_value)
     branch = current_branch(root)
     remote_name = determine_remote_name(root, provider)
+
+    # Explain provider-specific behavior before writing any config.
     if provider == SandboxProvider.LOCAL:
         console.print(
             "[yellow]Local mode creates one full clone per agent and launches agents with full permissions inside those clones.[/yellow]"
@@ -124,6 +127,7 @@ def init() -> None:
             "[yellow]Warning:[/yellow] spawn uses committed git state. Uncommitted project changes will not be present in sandboxes."
         )
 
+    # Persist the initial project configuration.
     config = RevisConfig(
         provider=provider,
         default_agent=AgentType.CODEX,
@@ -137,6 +141,8 @@ def init() -> None:
     )
     save_config(root, config)
     ensure_gitignore(root)
+
+    # Verify the chosen coordination remote can actually support the workflow.
     if not uses_managed_trunk(remote_name=remote_name) and not remote_branch_exists(
         root, remote_name=remote_name, branch=branch
     ):
@@ -144,6 +150,8 @@ def init() -> None:
             f"Remote branch {remote_name}/{branch} does not exist. "
             f"Push {branch} to {remote_name} before using remote-backed coordination."
         )
+
+    # Bootstrap the shared coordination branches and report the result.
     target_url = configure_coordination_remote(root, provider, remote_name)
     bootstrap_remote(
         root,
@@ -171,23 +179,30 @@ def spawn(
         n: Number of default-agent spawns to add.
         resume: Whether this spawn should resume prior work.
     """
+    # Load project state and compute how many agents to launch.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     objective_text = load_objective_text(root, config)
     provider = get_provider(root, config)
+
     counts = Counter()
     counts[AgentType.CODEX] += codex
     if n:
         counts[config.default_agent] += n
+
     total = sum(counts.values())
     if total <= 0:
         raise typer.BadParameter("Pass --codex or --n")
+
+    # Fail fast if any requested agent type cannot launch in this environment.
     for agent_type, count in counts.items():
         if count <= 0:
             continue
         validate_agent_launch(
             agent_type, config.provider, config=config, require_daytona_credentials=True
         )
+
+    # Allocate stable agent IDs before collecting seeded directions.
     existing = load_all_agent_records(root)
     next_numbers = next_agent_numbers(existing)
     planned_agents: list[tuple[AgentType, str, str]] = []
@@ -196,12 +211,14 @@ def spawn(
             number = next_numbers[agent_type]
             next_numbers[agent_type] += 1
             agent_id = f"{agent_type.value}-{number}"
-            planned_agents.append(
-                (agent_type, agent_id, f"revis/{agent_id}/work")
-            )
+            planned_agents.append((agent_type, agent_id, f"revis/{agent_id}/work"))
+    # Allocate IDs before prompting so each seeded direction is attached to the
+    # exact agent/branch it will influence at spawn time.
     starting_directions = prompt_starting_directions(
         [agent_id for _, agent_id, _ in planned_agents]
     )
+
+    # Initialize the swarm registry on the first spawn for this project.
     registry = load_registry(root)
     if registry is None:
         registry = RuntimeRegistry(
@@ -216,6 +233,8 @@ def spawn(
             config_path=str(root / CONFIG_PATH),
         )
         write_registry(root, registry)
+
+    # Spawn each agent and persist its runtime metadata as it comes online.
     spawned: list[AgentRuntimeRecord] = []
     for agent_type, agent_id, branch in planned_agents:
         starting_direction = starting_directions.get(agent_id)
@@ -255,14 +274,10 @@ def spawn(
             str(handle.root) if config.provider == SandboxProvider.LOCAL else None
         )
         record.tmux_session = (
-            handle.attach_label
-            if config.provider == SandboxProvider.LOCAL
-            else None
+            handle.attach_label if config.provider == SandboxProvider.LOCAL else None
         )
         record.workspace_name = (
-            handle.attach_label
-            if config.provider == SandboxProvider.DAYTONA
-            else None
+            handle.attach_label if config.provider == SandboxProvider.DAYTONA else None
         )
         record.workspace_url = handle.workspace_url
         write_agent_record(root, record)
@@ -279,6 +294,8 @@ def spawn(
             retention_archives=config.retention.max_event_archives,
         )
         spawned.append(record)
+
+    # Show attach commands once the whole batch is ready.
     table = Table(title="Spawned Agents")
     table.add_column("Agent")
     table.add_column("Type")
@@ -307,6 +324,7 @@ def log(
         title: Optional title or summary line.
         url: Optional supporting URL.
     """
+    # Append the finding inside the sandbox that produced it.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     meta = load_sandbox_meta(root)
@@ -320,6 +338,8 @@ def log(
         title=title,
         url=url,
     )
+
+    # Mirror the event back to host-side runtime state when available.
     update_root_runtime_from_env(
         config=config,
         agent_id=meta["agent_id"],
@@ -346,6 +366,7 @@ def findings(
         kind: Optional finding kind filter.
         source: Optional source identifier filter.
     """
+    # Load the shared ledger, then apply the requested query filters.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     entries = read_findings(root, remote_name=config.coordination_remote)
@@ -358,11 +379,14 @@ def findings(
 @app.command()
 def sync() -> None:
     """Manually rebase the current sandbox branch onto the active sync target."""
+    # Resolve the active sync target for this coordination mode.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     branch = sync_target_branch(
         remote_name=config.coordination_remote, base_branch=config.trunk_base
     )
+
+    # Attempt the sync and report the user-visible outcome.
     ok, result = try_sync_branch(
         root,
         remote_name=config.coordination_remote,
@@ -383,10 +407,14 @@ def sync() -> None:
 @app.command()
 def promote() -> None:
     """Promote the current sandbox branch using the provider-specific flow."""
+    # Load the current sandbox and decide which promotion path applies.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     meta = load_sandbox_meta(root)
     branch_name = current_branch(root)
+    # Promotion mode is chosen by the coordination remote, not the sandbox
+    # provider. Local tmux sandboxes can still promote through GitHub when the
+    # swarm is coordinating against a real remote.
     if uses_managed_trunk(remote_name=config.coordination_remote):
         summary = promote_branch(
             root,
@@ -423,6 +451,8 @@ def promote() -> None:
         title = pull_request.title
         url = pull_request.url
         summary = pull_request.title
+
+    # Record the promotion in the shared ledger and local runtime state.
     write_findings_entry(
         root,
         remote_name=config.coordination_remote,
@@ -445,6 +475,7 @@ def promote() -> None:
 @app.command()
 def status() -> None:
     """Show a Rich snapshot of swarm, findings, and daemon state."""
+    # Refresh live runtime state before rendering any summary tables.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     refresh_runtime(root, config)
@@ -459,6 +490,8 @@ def status() -> None:
     sha, subject = branch_head(
         root, remote_name=config.coordination_remote, branch=target_branch
     )
+
+    # Render a high-level swarm summary.
     table = Table(title="Revis Status")
     table.add_column("Metric")
     table.add_column("Value")
@@ -474,6 +507,8 @@ def status() -> None:
     else:
         table.add_row(f"Base ({config.trunk_base})", f"{sha[:8]} {subject}")
     console.print(table)
+
+    # Render per-agent details beneath the swarm summary.
     agent_table = Table(title="Agents")
     agent_table.add_column("Agent")
     agent_table.add_column("State")
@@ -509,10 +544,13 @@ def stop(force: bool = typer.Option(False, "--force")) -> None:
     Args:
         force: Whether to force immediate teardown instead of graceful stop.
     """
+    # Load the provider and current runtime records.
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     provider = get_provider(root, config)
     records = load_all_agent_records(root)
+
+    # Tear down each known sandbox and record the stop event.
     for record in records:
         record.state = AgentState.STOPPING
         write_agent_record(root, record)
@@ -579,6 +617,9 @@ def parse_objective(root: Path, value: str) -> ObjectiveConfig:
 def prompt_starting_directions(agent_ids: list[str]) -> dict[str, str | None]:
     """Collect optional starting directions for a spawn batch."""
 
+    # Seeded divergence is intentionally interactive so operators make an
+    # explicit choice per agent instead of accidentally reusing stale defaults
+    # in non-interactive scripts.
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         console.print(
             "[red]revis spawn requires an interactive terminal for seeded divergence.[/red]"
@@ -634,11 +675,14 @@ def determine_remote_name(root: Path, provider: SandboxProvider) -> str:
     """
     del provider
     remotes = run_git(root, ["remote"]).splitlines()
+    # Prefer `origin` when present because it is the least surprising remote for
+    # both Daytona clones and GitHub-backed promotion.
     if "origin" in remotes:
         return "origin"
     if len(remotes) == 1:
         return remotes[0]
     if not remotes:
+        # No remote means Revis needs a private local coordination surface.
         return "revis-local"
     raise RevisError(
         "Revis could not choose a coordination remote. Set `origin` or leave only one git remote configured."
@@ -659,6 +703,9 @@ def configure_coordination_remote(
         str: Coordination remote URL or local bare path.
     """
     del provider
+    # Coordination ownership is keyed off the remote name, not the provider:
+    # local sandboxes may still coordinate through GitHub, while `revis-local`
+    # means Revis owns the whole trunk/findings remote itself.
     if uses_managed_trunk(remote_name=remote_name):
         from revis.coordination.git import ensure_coordination_remote
 
@@ -710,9 +757,15 @@ def latest_promotion_finding(
 ) -> FindingEntry | None:
     """Return the newest agent finding that can seed a promotion PR."""
     preferred = {"result", "literature", "warning"}
+    # Promotion PRs read better when they point at the latest concrete work item
+    # rather than an earlier promotion record about the PR itself.
+
+    # Prefer findings that describe actual work over previous promotion records.
     for entry in entries:
         if entry.agent == agent_id and entry.kind in preferred:
             return entry
+
+    # Fall back to any non-promotion finding if nothing preferred exists yet.
     for entry in entries:
         if entry.agent == agent_id and entry.kind != "promotion":
             return entry
@@ -786,6 +839,7 @@ def refresh_runtime(root: Path, config: RevisConfig) -> None:
         root: Repository root.
         config: Loaded project configuration.
     """
+    # Probe each live sandbox and persist the refreshed record.
     provider = get_provider(root, config)
     for record in load_all_agent_records(root):
         try:
@@ -809,17 +863,26 @@ def update_root_runtime_from_env(
     """
     project_root = os.environ.get("REVIS_PROJECT_ROOT")
     if not project_root:
+        # Remote sandboxes do not share a writable host filesystem, so only
+        # local mode can opportunistically mirror runtime updates back into
+        # `.revis/runtime`.
         return
+
+    # Load the host-side runtime record that matches this sandbox.
     root = Path(project_root)
     record = load_agent_record(root, agent_id)
     if not record:
         return
+
+    # Update the per-agent timestamps first.
     timestamp = iso_now()
     if event_type == "finding_logged":
         record.last_finding_at = timestamp
     if event_type == "promotion":
         record.last_promotion_at = timestamp
     write_agent_record(root, record)
+
+    # Append matching event and metric samples for the monitor UI.
     append_event(
         root,
         {

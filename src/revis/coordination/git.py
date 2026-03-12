@@ -291,11 +291,18 @@ def bootstrap_remote(
         manage_trunk: Whether this provider keeps using the Revis-managed trunk.
     """
     add_or_update_remote(root, remote_name, target_url)
+    # Only the fallback `revis-local` remote owns a Revis-managed trunk. When
+    # coordinating through a real remote, Revis leaves the user's branch layout
+    # intact and limits itself to the findings ledger plus PR-based promotion.
+
+    # Seed the shared code branch only when Revis owns trunk management.
     if manage_trunk:
         if has_commits(root):
             run(["git", "push", "--force", remote_name, f"HEAD:refs/heads/{TRUNK_BRANCH}"], cwd=root)
         else:
             seed_empty_trunk(target_url)
+
+    # Seed the findings ledger in every coordination mode.
     seed_findings_branch(target_url, source_branch=TRUNK_BRANCH if manage_trunk else trunk_base_branch)
     if manage_trunk and target_url.endswith(".git") and Path(target_url).exists():
         run(["git", "--git-dir", target_url, "symbolic-ref", "HEAD", f"refs/heads/{TRUNK_BRANCH}"], cwd=root, check=False)
@@ -324,9 +331,14 @@ def seed_findings_branch(remote_url_value: str, *, source_branch: str) -> None:
         source_branch: Existing branch used as a temporary clone base.
     """
     with temp_dir("revis-seed-findings-") as temp_root:
+        # Clone any existing branch only to get a valid repository we can orphan
+        # from. The findings ledger intentionally has no shared history with code
+        # branches so collaboration data never pollutes normal repo history.
         run(["git", "clone", "--branch", source_branch, remote_url_value, str(temp_root / "repo")], cwd=temp_root)
         repo = temp_root / "repo"
         set_git_identity(repo, name="Revis", email="revis@localhost")
+
+        # Replace the working tree with the minimal findings bootstrap state.
         run(["git", "checkout", "--orphan", FINDINGS_BRANCH], cwd=repo)
         for child in repo.iterdir():
             if child.name == ".git":
@@ -460,6 +472,8 @@ def with_branch_worktree(repo: Path, *, remote_name: str, branch: str):
         fetch_remote_branch(repo, remote_name=remote_name, branch=branch)
         with temp_dir(f"revis-{branch.replace('/', '-')}-") as temp_root:
             worktree_path = temp_root / "tree"
+            # Shared coordination refs are edited through disposable detached
+            # worktrees so agent sandboxes never need to leave their own branch.
             run(["git", "worktree", "add", "--detach", str(worktree_path), remote_ref(remote_name, branch)], cwd=repo)
             try:
                 yield worktree_path
@@ -497,7 +511,11 @@ def write_findings_entry(
     """
     with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
         timestamp = iso_now()
+        # Timestamped filenames keep the ledger append-only and make raw branch
+        # inspection readable even before frontmatter is parsed.
         filename = timestamp.replace(":", "-") + f"-{agent_id}.md"
+
+        # Build the markdown finding payload.
         frontmatter = {
             "agent": agent_id,
             "timestamp": timestamp,
@@ -512,12 +530,19 @@ def write_findings_entry(
         path = worktree / "findings" / filename
         ensure_dir(path.parent)
         path.write_text(header + message.strip() + "\n")
+
+        # Commit the new finding onto the detached findings worktree.
         run(["git", "add", str(path.relative_to(worktree))], cwd=worktree)
         run(["git", "commit", "-m", f"finding: {agent_id} {timestamp}"], cwd=worktree)
         attempts = 0
+
+        # Rebase-and-push until we win the race with any concurrent logger.
         while True:
             attempts += 1
             try:
+                # Multiple agents can log concurrently. Rebase-and-retry keeps
+                # every finding as its own commit without introducing a central
+                # coordination service outside git.
                 run(["git", "pull", "--rebase", remote_name, FINDINGS_BRANCH], cwd=worktree)
                 run(["git", "push", remote_name, f"HEAD:refs/heads/{FINDINGS_BRANCH}"], cwd=worktree)
                 break
@@ -552,9 +577,13 @@ def read_findings(repo: Path, *, remote_name: str) -> list[FindingEntry]:
         list[FindingEntry]: Parsed findings in reverse chronological order.
     """
     entries: list[FindingEntry] = []
+
+    # Parse every finding file from the shared ledger snapshot.
     with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
         for path in sorted((worktree / "findings").glob("*.md")):
             entries.append(parse_finding(path))
+
+    # Return newest-first so CLI consumers can slice without resorting.
     entries.sort(key=lambda entry: parse_iso(entry.timestamp), reverse=True)
     return entries
 
@@ -617,7 +646,12 @@ def try_sync_branch(repo: Path, *, remote_name: str, branch: str, conflict_path:
         tuple[bool, str]: Success flag and outcome label.
     """
     if working_tree_dirty(repo):
+        # Auto-rebasing over an in-progress experiment would hide exactly the
+        # local edits the agent still needs to reason about, so dirty trees are
+        # surfaced as "skip and try later" instead of being forced through git.
         return False, "dirty"
+
+    # Attempt the rebase against the active coordination target.
     fetch_remote_branch(repo, remote_name=remote_name, branch=branch)
     result = run(["git", "rebase", f"{remote_name}/{branch}"], cwd=repo, check=False)
     if result.returncode == 0:
@@ -625,7 +659,12 @@ def try_sync_branch(repo: Path, *, remote_name: str, branch: str, conflict_path:
             conflict_path.unlink()
         return True, "rebased"
     conflicts = run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False).stdout.strip()
+    # Conflicts are written into the sandbox itself because the agent is already
+    # operating there; the monitor only needs a breadcrumb to point the human at
+    # the repo-local conflict artifact.
     conflict_path.write_text((conflicts or result.stderr.strip() or "rebase conflict") + "\n")
+
+    # Reset back to the pre-rebase state once the conflict has been surfaced.
     run(["git", "rebase", "--abort"], cwd=repo, check=False)
     return False, "conflict"
 
@@ -724,11 +763,14 @@ def github_repo_name(url: str) -> str:
 
 def push_branch_for_pr(repo: Path, *, remote_name: str, branch: str) -> None:
     """Push an agent branch so GitHub can open or update a PR for it."""
+    # Agents own their work branches outright, so force-with-lease preserves the
+    # "one branch per agent" workflow without clobbering unrelated remote state.
     run(["git", "push", "--force-with-lease", "-u", remote_name, f"{branch}:{branch}"], cwd=repo)
 
 
 def find_open_pull_request(repo: Path, *, repo_name: str, base_branch: str, head_branch: str) -> PullRequestRef | None:
     """Return the open PR for one branch pair, if it exists."""
+    # Ask GitHub whether this agent branch already has an open promotion PR.
     result = run(
         [
             "gh",
@@ -769,9 +811,14 @@ def create_or_reuse_pull_request(
     body: str,
 ) -> PullRequestRef:
     """Create a PR for the current branch pair or return the existing open one."""
+    # Reuse an existing promotion PR when one already tracks this branch pair.
     existing = find_open_pull_request(repo, repo_name=repo_name, base_branch=base_branch, head_branch=head_branch)
     if existing is not None:
+        # Revis treats promotion as "maintain the candidate PR for this agent
+        # branch", not "open a fresh PR every time the agent makes progress".
         return existing
+
+    # Create the promotion PR when this branch pair has not been promoted yet.
     run(
         [
             "gh",

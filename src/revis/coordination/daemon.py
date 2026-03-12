@@ -68,14 +68,19 @@ def run_daemon_cycle(repo: Path) -> None:
     Args:
         repo: Sandbox repo root.
     """
+    # Load config, sandbox metadata, and the latest shared findings.
     config = load_config(repo)
     meta = load_sandbox_meta(repo)
     entries = read_findings(repo, remote_name=config.coordination_remote)
+    # Agents reread plain markdown far more often than they rerun CLI commands,
+    # so the daemon materializes the latest ledger views into repo-local files.
     write_dashboard_files(repo, entries)
 
     project_root = Path(meta["project_root"]) if meta.get("project_root") else None
     agent_id = meta["agent_id"]
     branch = sync_target_branch(remote_name=config.coordination_remote, base_branch=config.trunk_base)
+
+    # Refresh the sandbox branch and update the heartbeat marker.
     ok, result = try_sync_branch(
         repo,
         remote_name=config.coordination_remote,
@@ -86,6 +91,10 @@ def run_daemon_cycle(repo: Path) -> None:
     heartbeat_path(repo).write_text(timestamp + "\n")
 
     if project_root:
+        # Mirror the daemon outcome back into host-side runtime files.
+        # Only local sandboxes know the host project root. Daytona still keeps
+        # its sandbox-local heartbeat files, but it cannot mirror runtime state
+        # back onto the operator's filesystem.
         record = load_agent_record(project_root, agent_id)
         if record:
             record.last_heartbeat = timestamp
@@ -123,17 +132,25 @@ def run_daemon_loop(repo: Path) -> None:
     Args:
         repo: Sandbox repo root.
     """
+    # Resolve the configured loop interval once.
     config = load_config(repo)
     interval_seconds = max(config.daemon_interval_minutes, 1) * 60
+
+    # Keep cycling until the process is explicitly stopped.
     while True:
         try:
             run_daemon_cycle(repo)
         except Exception as exc:
+            # The daemon stays alive across cycle failures so long-running swarms
+            # do not silently stop syncing after one transient git/provider
+            # error. The failure is surfaced through repo-local and host-local
+            # runtime artifacts instead.
             append_daemon_log(repo, f"cycle failed: {exc}")
             try:
                 meta = load_sandbox_meta(repo)
                 project_root = Path(meta["project_root"]) if meta.get("project_root") else None
                 if project_root:
+                    # Persist the last daemon failure into host-side runtime state.
                     record = load_agent_record(project_root, meta["agent_id"])
                     if record:
                         record.last_error = str(exc)

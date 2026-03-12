@@ -108,6 +108,7 @@ class RevisMonitor(App[None]):
 
     def on_mount(self) -> None:
         """Load config/provider state and start periodic refreshes."""
+        # Initialize the table schema and provider state once.
         table = self.query_one("#agents", DataTable)
         table.add_columns("Agent", "Type", "State", "Heartbeat", "Findings", "Promotions", "Sync", "Activity")
         table.cursor_type = "row"
@@ -122,6 +123,7 @@ class RevisMonitor(App[None]):
 
     def action_attach(self) -> None:
         """Suspend the TUI and attach to the selected agent session."""
+        # Resolve the currently highlighted agent row.
         table = self.query_one("#agents", DataTable)
         if table.cursor_row is None or table.cursor_row >= len(self.agent_rows):
             return
@@ -129,6 +131,8 @@ class RevisMonitor(App[None]):
         record = self.agent_rows[agent_id]
         if not getattr(record, "attach_cmd", None):
             return
+
+        # Suspend the UI while the user attaches to the live session.
         with self.suspend():
             subprocess.run(record.attach_cmd, check=False)
         self.refresh_view()
@@ -146,6 +150,8 @@ class RevisMonitor(App[None]):
     def refresh_view(self) -> None:
         """Refresh provider health, the agent table, and the event log."""
         if self.provider and self.config and time.time() - self.last_probe_at >= self.config.monitor.health_probe_seconds:
+            # Provider probes can be much more expensive than a pure UI repaint,
+            # so liveness checks are throttled on their own cadence.
             for record in load_all_agent_records(self.project_root):
                 try:
                     updated = self.provider.probe(record)
@@ -154,11 +160,14 @@ class RevisMonitor(App[None]):
                     updated = record
                 write_agent_record(self.project_root, updated)
             self.last_probe_at = time.time()
+
+        # Reload the latest runtime snapshots from disk.
         registry = load_registry(self.project_root)
         records = load_all_agent_records(self.project_root)
         records.sort(key=lambda record: record.agent_id)
         self.agent_rows = {record.agent_id: record for record in records}
 
+        # Refresh the summary pane.
         summary = self.query_one("#summary", Static)
         if registry:
             active = sum(1 for record in records if getattr(record.state, "value", record.state) == "active")
@@ -175,11 +184,14 @@ class RevisMonitor(App[None]):
         else:
             summary.update("No runtime registry found.")
 
+        # Rebuild the agent table from the latest metrics and events.
         table = self.query_one("#agents", DataTable)
         table.clear(columns=False)
         for record in records:
             metrics = load_metrics(self.project_root, record.agent_id)
             samples = [1.0 if sample.get("sync_ok") else 0.0 for sample in metrics]
+            # Count against a bounded recent event window so long-lived swarms do
+            # not make every UI refresh scan an unbounded history.
             findings = sum(1 for event in load_events(self.project_root, limit=200) if event.get("agent_id") == record.agent_id and event.get("type") == "finding_logged")
             promotions = sum(1 for event in load_events(self.project_root, limit=200) if event.get("agent_id") == record.agent_id and event.get("type") == "promotion")
             table.add_row(
@@ -196,6 +208,7 @@ class RevisMonitor(App[None]):
         if records:
             self.update_detail(records[0].agent_id if not table.cursor_coordinate else list(self.agent_rows.keys())[table.cursor_row])
 
+        # Refresh the recent event log pane.
         events_widget = self.query_one("#events", RichLog)
         events_widget.clear()
         for event in load_events(self.project_root, limit=40):
@@ -216,18 +229,24 @@ class RevisMonitor(App[None]):
         if not record:
             detail.update("No agent selected.")
             return
+
+        # Start with the always-present identity and branch details.
         lines = [
             f"Agent: {record.agent_id}",
             f"Branch: {record.branch}",
         ]
         if record.starting_direction:
             lines.append(f"Starting direction: {record.starting_direction}")
+
+        # Add sandbox attachment details next.
         lines.extend(
             [
                 f"Sandbox: {record.sandbox_path_or_id}",
                 f"Attach: {' '.join(record.attach_cmd) if record.attach_cmd else '-'}",
             ]
         )
+
+        # Append any optional error or workspace metadata.
         if record.last_error:
             lines.append(f"Error: {record.last_error}")
         if record.conflict_path:

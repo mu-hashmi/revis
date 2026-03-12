@@ -26,6 +26,8 @@ def _compact(value):
     Returns:
         object: Payload with `None` values removed from mappings.
     """
+    # TOML has no native null, and explicitly writing every absent runtime field
+    # makes the operator-facing files much noisier to inspect.
     if isinstance(value, dict):
         return {key: _compact(item) for key, item in value.items() if item is not None}
     if isinstance(value, list):
@@ -241,9 +243,12 @@ def append_event(root: Path, event: dict[str, object], *, retention_entries: int
         retention_bytes: Maximum live file size before rotation.
         retention_archives: Number of rotated archive files to keep.
     """
+    # Append into the live event log first.
     ensure_runtime(root)
     path = events_path(root)
     append_jsonl(path, event)
+
+    # Enforce retention after every append so the monitor never reads unbounded logs.
     rotate_events(path, retention_entries=retention_entries, retention_bytes=retention_bytes, retention_archives=retention_archives)
 
 
@@ -277,11 +282,17 @@ def rotate_events(path: Path, *, retention_entries: int, retention_bytes: int, r
     """
     if not path.exists():
         return
+
+    # Check whether the live event log still fits inside the retention budget.
     lines = path.read_text().splitlines()
     size = path.stat().st_size
     if len(lines) <= retention_entries and size <= retention_bytes:
         return
+
+    # Rotate older archives out of the way before rewriting the live file.
     archive_dir = ensure_dir(path.parent / "events")
+    # Rotate archives in-place so the live file stays small enough for the TUI
+    # to read repeatedly without a separate database.
     for index in range(retention_archives - 1, -1, -1):
         current = archive_dir / f"events.{index}.jsonl"
         if not current.exists():
@@ -290,6 +301,8 @@ def rotate_events(path: Path, *, retention_entries: int, retention_bytes: int, r
             current.unlink()
         else:
             current.rename(archive_dir / f"events.{index + 1}.jsonl")
+
+    # Preserve only the newest live entries after rotation.
     keep = lines[-retention_entries:]
     path.rename(archive_dir / "events.0.jsonl")
     path.write_text("".join(f"{line}\n" for line in keep))

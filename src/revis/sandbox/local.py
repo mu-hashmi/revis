@@ -57,6 +57,11 @@ class LocalSandboxProvider(SandboxProvider):
             remote_name=self.config.coordination_remote, base_branch=self.config.trunk_base
         )
         try:
+            # Local sandboxes follow the same sync target the daemon will later
+            # rebase onto. That keeps local mode compatible with both the
+            # private `revis-local` trunk and real GitHub-backed coordination.
+
+            # Prepare the disposable repo clone and work branch.
             clone_remote(
                 coordination_url, self.config.coordination_remote, repo, branch=base_branch
             )
@@ -72,6 +77,8 @@ class LocalSandboxProvider(SandboxProvider):
                     repo, remote_name=self.config.coordination_remote, agent_branch=branch
                 )
             set_git_identity(repo, name=agent_id, email=f"{agent_id}@revis.local")
+
+            # Install sandbox-local config, metadata, and instructions.
             self._copy_local_config(repo)
             write_sandbox_meta(
                 repo,
@@ -90,6 +97,10 @@ class LocalSandboxProvider(SandboxProvider):
             )
             self._sync_local_agent_credentials(repo, agent_type=agent_type)
             append_info_exclude(repo, revis_ignore_patterns())
+
+            # Start the agent and daemon session once the repo is ready.
+            # Session names are deterministic per agent so `status` and
+            # `monitor` always have a stable attach target after respawns.
             self._kill_session_if_exists(session_name)
             self._start_tmux_session(repo, session_name=session_name, agent_id=agent_id, agent_type=agent_type)
             return SandboxHandle(
@@ -101,6 +112,8 @@ class LocalSandboxProvider(SandboxProvider):
                 attach_label=session_name,
             )
         except Exception:
+            # Half-created local sandboxes are cheaper to discard than to debug.
+            # Keeping them around would also make later respawns ambiguous.
             self._kill_session_if_exists(session_name)
             if repo.exists():
                 shutil.rmtree(repo.parent, ignore_errors=True)
@@ -118,6 +131,8 @@ class LocalSandboxProvider(SandboxProvider):
         session = record.tmux_session or f"revis-{record.agent_id}"
         active = run(["tmux", "has-session", "-t", session], check=False, capture=True).returncode == 0
         record.state = AgentState.ACTIVE if active else AgentState.STOPPED
+
+        # Refresh daemon-produced heartbeat and conflict markers.
         repo = Path(record.sandbox_path_or_id)
         heartbeat = repo / ".revis" / "last-daemon-sync"
         if heartbeat.exists():
@@ -137,14 +152,21 @@ class LocalSandboxProvider(SandboxProvider):
             AgentRuntimeRecord: Updated runtime record after teardown.
         """
         session = record.tmux_session or f"revis-{record.agent_id}"
+
+        # Stop the tmux session first so the agent and daemon can exit cleanly.
         if run(["tmux", "has-session", "-t", session], check=False).returncode == 0:
             if force:
                 run(["tmux", "kill-session", "-t", session], check=False)
             else:
+                # Let both windows handle Ctrl-C first so the daemon can finish
+                # any in-flight sync/log write before the disposable clone is
+                # torn down.
                 run(["tmux", "send-keys", "-t", f"{session}:0", "C-c"], check=False)
                 run(["tmux", "send-keys", "-t", f"{session}:1", "C-c"], check=False)
                 time.sleep(3)
                 run(["tmux", "kill-session", "-t", session], check=False)
+
+        # Remove the disposable clone once the session is gone.
         repo = Path(record.sandbox_path_or_id)
         if repo.exists():
             shutil.rmtree(repo.parent, ignore_errors=True)
@@ -197,13 +219,18 @@ class LocalSandboxProvider(SandboxProvider):
             agent_id: Stable Revis agent identifier.
             agent_type: Agent type running in the sandbox.
         """
+        # Build the two long-lived commands that make up a local sandbox.
         agent_command = self._render_agent_command(repo, agent_id=agent_id, agent_type=agent_type)
         daemon_command = shell_join(["env", f"REVIS_PROJECT_ROOT={self.project_root}", "revis", "_daemon-run"])
+
+        # Start the agent window first, then add the daemon beside it.
         run(
             ["tmux", "new-session", "-d", "-s", session_name, "-c", str(repo), agent_command],
             capture=True,
         )
         run(["tmux", "rename-window", "-t", f"{session_name}:0", "agent"], capture=True)
+        # Keeping the daemon in the same session makes local debugging a single
+        # tmux attach instead of two separate process hunts.
         run(["tmux", "new-window", "-t", session_name, "-n", "daemon", "-c", str(repo), daemon_command], capture=True)
 
     def _render_agent_command(self, repo: Path, *, agent_id: str, agent_type: AgentType) -> str:
@@ -225,6 +252,8 @@ class LocalSandboxProvider(SandboxProvider):
             raise RevisError("Revis local sandboxes are codex-only right now.")
         template = self.config.codex_template.argv
         argv = substitute_argv(template, prompt=prompt, agent_id=agent_id)
+        # Local sandboxes can mirror findings/promotion activity back into the
+        # host runtime registry because they share the same filesystem.
         env_vars = {"REVIS_PROJECT_ROOT": str(self.project_root)}
         env_vars["CODEX_HOME"] = str(repo / ".revis" / "codex-home")
         command = ["env", *[f"{key}={value}" for key, value in env_vars.items()], *argv]
@@ -242,6 +271,7 @@ def install_prompt(repo: Path, *, agent_id: str, agent_type: AgentType) -> str:
     Returns:
         str: Startup prompt passed into the agent CLI.
     """
+    # Import lazily so sandbox providers do not pay Textual/template cost at import time.
     from revis.agent.instructions import render_startup_prompt
 
     return render_startup_prompt(agent_id=agent_id, agent_type=agent_type)
