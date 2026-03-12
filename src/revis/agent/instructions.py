@@ -214,8 +214,11 @@ def revis_ignore_patterns() -> list[str]:
         ".revis/daemon.log",
         ".revis/sync-conflict",
         ".revis/agent.toml",
+        ".revis/config.toml",
         ".revis/protocol.md",
         ".revis/objective.md",
+        ".revis/venv/",
+        ".revis/*.whl",
         ".revis/codex-home/",
         "AGENTS.md",
     ]

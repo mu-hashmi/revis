@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
+import time
 
 import yaml
 
 from revis.core.models import FindingEntry
-from revis.coordination.repo import FINDINGS_BRANCH, with_branch_worktree
+from revis.coordination.repo import FINDINGS_BRANCH, fetch_remote_branch, with_branch_worktree
 from revis.core.util import RevisError, iso_now, parse_iso, run
 
 
@@ -52,22 +54,54 @@ def write_findings_entry(
         # Commit the new finding onto the detached findings worktree.
         run(["git", "add", str(path.relative_to(worktree))], cwd=worktree)
         run(["git", "commit", "-m", f"finding: {agent_id} {timestamp}"], cwd=worktree)
-        attempts = 0
-
-        # Rebase-and-push until we win the race with any concurrent logger.
-        while True:
-            attempts += 1
-            try:
-                # Multiple agents can log concurrently. Rebase-and-retry keeps
-                # every finding as its own commit without introducing a central
-                # coordination service outside git.
-                run(["git", "pull", "--rebase", remote_name, FINDINGS_BRANCH], cwd=worktree)
-                run(["git", "push", remote_name, f"HEAD:refs/heads/{FINDINGS_BRANCH}"], cwd=worktree)
-                break
-            except RevisError:
-                if attempts >= 3:
-                    raise
+        _push_findings_with_retry(worktree, remote_name=remote_name)
         return path
+
+
+def _push_findings_with_retry(worktree: Path, *, remote_name: str) -> None:
+    """Push one findings commit with optimistic retry under concurrent writers."""
+
+    max_attempts = 8
+
+    # Findings writes are append-only commits. When multiple agents race, the
+    # correct response is to replay this one commit onto the newest remote tip,
+    # not to introduce a separate lock service outside git.
+    for attempt in range(1, max_attempts + 1):
+        try:
+            fetch_remote_branch(worktree, remote_name=remote_name, branch=FINDINGS_BRANCH)
+            run(["git", "rebase", f"{remote_name}/{FINDINGS_BRANCH}"], cwd=worktree)
+            run(["git", "push", remote_name, f"HEAD:refs/heads/{FINDINGS_BRANCH}"], cwd=worktree)
+            return
+        except RevisError as exc:
+            run(["git", "rebase", "--abort"], cwd=worktree, check=False)
+            if attempt >= max_attempts or not _is_retryable_findings_race(str(exc)):
+                raise
+            time.sleep(_retry_backoff_seconds(attempt))
+
+    raise RevisError("Failed to push finding after exhausting retries.")
+
+
+def _is_retryable_findings_race(message: str) -> bool:
+    """Return whether a git failure message indicates a normal write race."""
+
+    retryable_markers = (
+        "non-fast-forward",
+        "fetch first",
+        "remote rejected",
+        "incorrect old value provided",
+        "failed to push some refs",
+        "stale info",
+    )
+    lowered = message.lower()
+    return any(marker in lowered for marker in retryable_markers)
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    """Return bounded exponential backoff with jitter for a retry attempt."""
+
+    base_delay = 0.05
+    capped = min(base_delay * (2 ** (attempt - 1)), 1.0)
+    return random.uniform(capped / 2, capped * 1.5)
 
 
 def fetch_findings_tree(repo: Path, *, remote_name: str) -> list[Path]:
