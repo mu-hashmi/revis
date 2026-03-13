@@ -19,6 +19,7 @@ def write_findings_entry(
     remote_name: str,
     agent_id: str,
     session_id: str | None = None,
+    timestamp: str | None = None,
     message: str,
     kind: str | None,
     source: str | None,
@@ -28,14 +29,14 @@ def write_findings_entry(
     """Write, commit, and push one findings entry on the findings branch."""
 
     with with_branch_worktree(repo, remote_name=remote_name, branch=FINDINGS_BRANCH) as worktree:
-        timestamp = iso_now()
+        entry_timestamp = timestamp or iso_now()
 
         # Timestamped filenames keep the ledger append-only and make raw branch
         # inspection readable even before frontmatter is parsed.
         # Findings use second-precision timestamps in frontmatter, so add a
         # short nonce to filenames to keep same-agent bursts append-only.
         filename = (
-            timestamp.replace(":", "-")
+            entry_timestamp.replace(":", "-")
             + f"-{random.randrange(0, 1_000_000):06d}-{agent_id}.md"
         )
 
@@ -45,7 +46,7 @@ def write_findings_entry(
             for key, value in {
                 "agent": agent_id,
                 "session_id": session_id,
-                "timestamp": timestamp,
+                "timestamp": entry_timestamp,
                 "kind": kind,
                 "source": source,
                 "title": title,
@@ -60,7 +61,7 @@ def write_findings_entry(
 
         # Commit the new finding onto the detached findings worktree.
         run(["git", "add", str(path.relative_to(worktree))], cwd=worktree)
-        run(["git", "commit", "-m", f"finding: {agent_id} {timestamp}"], cwd=worktree)
+        run(["git", "commit", "-m", f"finding: {agent_id} {entry_timestamp}"], cwd=worktree)
         _push_findings_with_retry(worktree, remote_name=remote_name)
         return path
 

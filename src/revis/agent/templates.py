@@ -21,6 +21,7 @@ def protocol_body(*, objective_text: str, daemon_interval_minutes: int) -> str:
 
 You are one of several agents working on the same research objective in parallel.
 Coordinate through the findings ledger and the current promotion target.
+The sandbox already has its assigned Revis worktree and branch; stay on it unless the operator explicitly tells you otherwise.
 
 ## Workflow
 
@@ -114,6 +115,7 @@ description: Use the Revis coordination protocol inside a swarm sandbox. Read th
 # Revis
 
 Read `.revis/protocol.md` first, then follow it exactly.
+The sandbox already has its assigned Revis worktree and branch; stay on it unless the operator explicitly tells you otherwise.
 
 When working in a Revis sandbox:
 
@@ -145,6 +147,7 @@ This sandbox is part of a Revis swarm.
 - Use the `{skill_ref}` skill first.
 - Read `.revis/protocol.md` for the full workflow.
 - Read `.revis/objective.md` for the research objective.
+- The current sandbox is already on its assigned Revis worktree and branch.
 <!-- revis:end -->
 """
 
@@ -162,5 +165,5 @@ def startup_prompt(*, agent_id: str) -> str:
 
 Use the `revis` skill immediately, then read `.revis/protocol.md` and `.revis/objective.md`.
 
-This sandbox runs Codex. Work autonomously, log neutral fact-only findings, keep implications out of your own result entries, and use `revis promote` when you have a candidate improvement.
+This sandbox runs Codex. The sandbox already has its assigned Revis worktree and branch; stay on it unless the operator explicitly tells you otherwise. Work autonomously, log neutral fact-only findings, keep implications out of your own result entries, and use `revis promote` when you have a candidate improvement.
 """

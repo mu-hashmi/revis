@@ -20,6 +20,11 @@ from revis.coordination.bootstrap import bootstrap_remote
 from revis.coordination.daemon import conflict_path, run_daemon_loop
 from revis.coordination.findings import filter_findings, render_findings
 from revis.coordination.ledger import read_findings, write_findings_entry
+from revis.coordination.promotion_seed import (
+    promotion_seedable_kind,
+    wait_for_promotion_seed,
+    write_promotion_seed,
+)
 from revis.coordination.promotion import (
     build_promotion_body,
     build_promotion_title,
@@ -67,7 +72,7 @@ from revis.core.models import (
     RevisConfig,
     SandboxProvider,
 )
-from revis.core.util import RevisError, iso_now
+from revis.core.util import RevisError, iso_now, run
 from revis.sandbox import get_provider
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -244,11 +249,38 @@ def log(
     root = resolve_repo_root(Path.cwd())
     config = load_config(root)
     meta = load_sandbox_meta(root)
+    session_id = sandbox_session_id(meta)
+    timestamp = iso_now()
+    branch_name = current_branch(root)
+    head_sha = run(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+
+    # Seed promotion locally before touching the shared ledger so a concurrent
+    # `revis promote` can use this exact finding without waiting on the remote
+    # findings branch to reflect the new commit.
+    if promotion_seedable_kind(kind):
+        write_promotion_seed(
+            root,
+            finding=FindingEntry(
+                path="",
+                agent=meta["agent_id"],
+                session_id=session_id,
+                timestamp=timestamp,
+                body=message.strip(),
+                kind=kind,
+                source=source,
+                title=title,
+                url=url,
+            ),
+            branch_name=branch_name,
+            head_sha=head_sha,
+        )
+
     write_findings_entry(
         root,
         remote_name=config.coordination_remote,
         agent_id=meta["agent_id"],
-        session_id=sandbox_session_id(meta),
+        session_id=session_id,
+        timestamp=timestamp,
         message=message,
         kind=kind,
         source=source,
@@ -351,6 +383,8 @@ def promote() -> None:
     config = load_config(root)
     meta = load_sandbox_meta(root)
     branch_name = current_branch(root)
+    session_id = sandbox_session_id(meta)
+    head_sha = run(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
     # Promotion mode is chosen by the coordination remote, not the sandbox
     # provider. Local tmux sandboxes can still promote through GitHub when the
     # swarm is coordinating against a real remote.
@@ -371,8 +405,16 @@ def promote() -> None:
         push_branch_for_pr(
             root, remote_name=config.coordination_remote, branch=branch_name
         )
-        entries = read_findings(root, remote_name=config.coordination_remote)
-        finding = latest_promotion_finding(entries, agent_id=meta["agent_id"])
+        finding = wait_for_promotion_seed(
+            root,
+            agent_id=meta["agent_id"],
+            session_id=session_id,
+            branch_name=branch_name,
+            head_sha=head_sha,
+        )
+        if finding is None:
+            entries = read_findings(root, remote_name=config.coordination_remote)
+            finding = latest_promotion_finding(entries, agent_id=meta["agent_id"])
         title = build_promotion_title(branch_name=branch_name, finding=finding)
         body = build_promotion_body(
             branch_name=branch_name, base_branch=config.trunk_base, finding=finding
@@ -396,7 +438,7 @@ def promote() -> None:
         root,
         remote_name=config.coordination_remote,
         agent_id=meta["agent_id"],
-        session_id=sandbox_session_id(meta),
+        session_id=session_id,
         message=message,
         kind="promotion",
         source=None,
