@@ -1,56 +1,107 @@
 # Instructions for coding agents working on this codebase
 
-NEVER add tests, unless explicitly requested. Instead, use the CLI yourself and/or create one-off in-line scripts to test your implementation.
+Revis is a passive coordination CLI for tmux-backed coding agent workspaces. Agents inside those workspaces are not supposed to know Revis exists.
+
+Currently only supports Codex, but plans to add support for other providers in the future.
+
+## Scope
+
+Revis owns three things:
+
+- creating isolated local workspace clones on namespaced git branches
+- running a host daemon that pushes/fetches branch updates and relays commit summaries into local tmux sessions
+- promoting one chosen workspace branch into trunk or into a pull request
+
+Do not reintroduce findings ledgers, agent protocols, AGENTS injection, Daytona, or any other agent-facing coordination layer unless explicitly requested.
 
 ## Architecture
 
-Revis is a multi-agent research coordination CLI. The layers are:
-- `core/` — Data models, config, utilities. No I/O beyond file read/write.
-- `coordination/` — Git-backed coordination (findings, sync, runtime state). Domain logic lives here.
-- `sandbox/` — Provider abstraction for spawning sandboxes (local tmux, Daytona).
-- `agent/` — Agent bootstrap: credentials, instructions, templates.
-- `cli/` — Typer commands. Thin layer that calls into coordination/sandbox.
+The code lives under `src/`:
+
+- `src/core/`
+  - shared models, config loading, filesystem helpers, IPC helpers, process helpers, and string/time utilities
+  - keep these focused on reusable primitives; avoid pushing orchestration logic down here
+- `src/coordination/`
+  - git-backed domain logic: repository setup, workspace creation, daemon sync/relay, runtime persistence, status snapshots, and promotion
+  - this is where the real product behavior belongs
+- `src/cli/`
+  - Commander command wiring, shared status formatting, and the Ink monitor
+  - keep entrypoints thin and delegate to `coordination/`
+- `src/bin/`
+  - CLI entrypoint with the executable shebang
+
+Current important modules:
+
+- `src/coordination/workspaces.ts`
+  - creates clones, tmux sessions, hooks, and workspace runtime records
+- `src/coordination/daemon.ts`
+  - owns the daemon IPC server, push/fetch loop, relay logic, and automatic rebases
+- `src/coordination/promotion.ts`
+  - operator-facing promotion orchestration
+- `src/coordination/promotion-local.ts`
+  - managed-trunk local merges
+- `src/coordination/promotion-github.ts`
+  - GitHub CLI PR flows
+- `src/coordination/runtime.ts`
+  - JSON runtime state and activity/event persistence
+- `src/cli/monitor.tsx`
+  - Ink UI components only
+- `src/cli/monitor-session.ts`
+  - attach-aware monitor loop outside the view layer
+
+## Product invariants
+
+- Workspace branches are always `revis/<operator>/agent-<n>/work`.
+- The operator slug comes from local git identity.
+- `revis init` prefers `origin`, otherwise the sole remote, otherwise creates `.revis/coordination.git` as `revis-local`.
+- Local workspaces live under `.revis/workspaces/agent-<n>/repo`.
+- Workspace `post-commit` hooks notify the daemon over local IPC.
+- The daemon is event-driven for local commits and poll-driven for remote discovery.
+- Promotion is operator-only.
+- Agents do not run `revis` commands inside their sessions.
+
+If a change would violate one of these, stop and verify that the product change is intentional.
 
 ## Conventions
 
-- Docstrings are required on all public functions and any internal function whose purpose isn't immediately obvious from its name and signature.
+- Use JSDoc-style module/function comments on public functions and on non-trivial internal helpers.
+- Add blank lines between logical phases inside functions.
+- Prefer loud failures over silent fallbacks. If state is corrupted, surface it.
+- Keep ownership clear:
+  - generic git helpers in `repo.ts`
+  - promotion-backend-specific logic in the relevant promotion module
+  - monitor rendering in `monitor.tsx`, attach/session control elsewhere
 
 ## Validation
 
-When tests exist, prefer the suite before ad-hoc scripts. Tests should check intent, not implementation details.
+Prefer the existing Node suite and build checks over ad-hoc validation.
 
-### Commands
+Primary commands:
 
-- `uv run pytest`
-  - Runs the full automated suite under `tests/`.
-  - Covers repo-backed findings ledger behavior, sync/rebase flows, daemon cycle behavior, promotion helpers, PR creation/reuse flow via a fake `gh`, spawn/runtime persistence, CLI command behavior, and the Textual monitor UI.
+- `npm run typecheck`
+  - strict TypeScript check
+- `npm test`
+  - Vitest suite covering workspace creation, daemon relay behavior, promotion flows, and UI/CLI behavior
+- `npm run build`
+  - production bundle via `tsdown`
 
-- `uv run pytest tests/test_ledger.py`
-  - Focuses on findings write/read roundtrips and concurrent ledger writes against a real bare git remote.
+Current test files:
 
-- `uv run pytest tests/test_sync_and_daemon.py`
-  - Covers `try_sync_branch(...)` dirty/conflict behavior and daemon-cycle materialization of findings/runtime state.
+- `tests/coordination.test.ts`
+  - workspace creation, hook installation, daemon relay, cross-operator sync
+- `tests/promotion.test.ts`
+  - managed-trunk promotion, rebase propagation, GitHub PR reuse flow
+- `tests/ui.test.tsx`
+  - `status`, `monitor`, and `stop`
 
-- `uv run pytest tests/test_promotion.py`
-  - Covers managed-trunk promotion and GitHub-style PR promotion behavior without touching the real GitHub API.
+## Live smokes
 
-- `uv run pytest tests/test_cli.py`
-  - Covers operator-facing CLI flows that can be validated locally: `findings`, `status`, and `stop`.
+Keep these as opt-in manual checks, not normal suite tests:
 
-- `uv run pytest tests/test_monitor.py`
-  - Covers the monitor’s headless Textual rendering and attach action dispatch.
+- `revis init`, `revis workspace N`, and `revis spawn --codex N` against a real tmux/Codex environment
+- commit-hook relay into live Codex sessions
+- shared-remote multi-operator sync against a real git remote
+- `revis promote <agent-id>` against a real GitHub remote and `gh`
+- monitor attach behavior in a real terminal
 
-- `uv run pytest tests/test_spawning_runtime.py`
-  - Covers spawn planning, runtime registry creation, event logging, and failure persistence.
-
-### Gated Live Smokes
-
-These should stay as opt-in live smokes instead of normal suite tests because they depend on real external systems, real credentials, or real long-lived process behavior:
-
-- Local tmux-backed sandbox spawn with a real Codex session.
-- Daytona workspace lifecycle against the real Daytona API.
-- Dirty-worktree wheel install into Daytona sandboxes.
-- Real GitHub PR creation/reuse against an actual GitHub repo.
-- End-to-end attach/debug flows that require a real terminal session.
-
-Use those live smokes when changing provider wiring, auth handling, sandbox bootstrap, or GitHub/Daytona integration behavior. The suite should catch local regressions first; the live smokes confirm the external seams still behave in reality.
+Use those smokes when changing tmux wiring, daemon IPC, remote sync behavior, or GitHub promotion behavior.

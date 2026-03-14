@@ -1,118 +1,156 @@
 # Revis
 
-Revis is the coordination layer that enables multiple coding agents to collaborate on the same research problem[^1]. Run N coding agents on your repo simultaneously with `revis spawn --codex N`. Agents independently explore different ideas, share findings in real-time, and submit candidate improvements through a git-native protocol. Agents can run locally or on cloud sandboxes via Daytona.
+Revis is a passive coordination layer for parallel coding agent workspaces.
+
+It does three things:
+
+1. creates isolated local clones on namespaced branches like `revis/alice/agent-3/work`
+2. runs a daemon that pushes local workspace branches, fetches everyone else's `revis/*` branches, and relays commit summaries into your local tmux sessions
+3. lets the operator promote a chosen workspace branch
 
 ## Install
+
 ```bash
-uv tool install revis
+npx revis --help
 ```
 
-## Usage
+Or:
 
-### You (the human)
 ```bash
-# Initialize Revis in your repo
+npm install -g revis
+```
+
+## Requirements
+
+- Node 20+
+- `git`
+- `tmux`
+- `codex` on your `PATH` if you want `revis spawn --codex`
+- `gh` on your `PATH` if you want PR-based promotion against a GitHub remote
+
+## Commands
+
+```bash
 revis init
-
-# Spawn 5 Codex agents
-revis spawn --codex 5
-
-# Check progress
+revis workspace 4
+revis spawn --codex 4
 revis status
-
-# Live dashboard — hit Enter on any agent to attach to its session
 revis monitor
-
-# Read the latest findings yourself
-revis findings --last 10
-
-# Done — stop all agents, keep the results
+revis promote agent-2
 revis stop
+revis version
 ```
 
-### The agents (called automatically inside each sandbox)
+## Quick Start
+
 ```bash
-# Log neutral fact-only findings
-revis log "Set weight decay to 0.3. T4 pass rate changed from 35% to 41% over 200 eval samples."
-
-# Read what other agents have found (also auto-refreshed to .revis/latest-findings.md)
-revis findings
-
-# Submit a candidate improvement
-revis promote
-
-# Rebase onto the current sync target (also runs automatically via daemon)
-revis sync
+revis init
+revis workspace 4
+revis spawn --codex 4
+revis status
+revis monitor
 ```
+
+If you only want the workspace shells and daemon, use `revis workspace N`. If you want Revis to also launch Codex in each tmux session, use `revis spawn --codex N`.
 
 ## How It Works
 
-Each agent gets its own sandbox with a full git clone of your repo and
-a dedicated working branch `revis/<agent-id>/work`. Agents share insights via the shared `revis/findings` branch, and
-promote progress by opening/updating PRs. 
+`revis init` chooses a coordination remote:
 
-### Coordination Protocol
+- prefer `origin`
+- otherwise use the only configured remote
+- otherwise create a local bare remote at `.revis/coordination.git` and use managed trunk mode with `revis/trunk`
 
-**`revis/findings`** - An append-only orphan branch (no shared commit history with main) where every agent commits a short
-markdown file after each experiment or source-reading pass, describing only
-what it tried or read and what happened concretely (i.e. an experiment
-ledger). A background daemon fetches this branch periodically and writes the
-latest entries to a local file in each sandbox, so every agent always has access
-to everyone else's work. Failures get logged too:
-`tried X. Error rate increased from 2% to 15%.`
+It also writes `.revis/config.json` with:
 
-The wording boundary matters. **An agent that already holds a hypothesis will
-read its own results through that lens, so its interpretation is the least
-independent one available and risks anchoring every other agent that syncs it.** 
-`Error rate increased from 2% to 15%` is a factual finding. `Error rate jumped to 15%`
-adds interpretation through connotation. Literature findings follow the same rule: 
-they may summarize source claims and include one neutral sentence of relevance framing 
-such as `Read while investigating retrieval-heavy architectures.`, 
-but they should not add implications such as `this suggests we should adopt...`.
+- `coordinationRemote`
+- `trunkBase`
+- `codexTemplate`
+- `remotePollSeconds`
 
-**Agent branch promotion** - When an agent believes it has a candidate improvement (i.e. a commit or series of commits
-that moves a metric, fixes a failure, or otherwise advances the objective), it runs `revis promote`. This pushes the agent 
-branch and opens or updates a GitHub PR against the configured base branch.
+`revis workspace N` creates `N` local clones under `.revis/workspaces/agent-N/repo`, creates a tmux session per workspace, installs a `post-commit` hook, writes workspace runtime metadata, and ensures the daemon is running.
 
-A daemon runs inside each sandbox on a configurable interval, handling the
-git fetch/rebase cycle deterministically. Agents don't need to remember to
-sync, they just read files and run experiments. The fallback `revis-local`
-remote rebases onto `revis/trunk`; any real git remote rebases onto the
-configured base branch.
+`revis spawn --codex N` does the same setup and then launches the configured Codex command in each tmux session.
 
-## Project Structure
+The daemon listens on a Unix domain socket on Unix-like systems and on a named pipe on Windows. Every workspace `post-commit` hook notifies the daemon immediately with the workspace id, branch, and new commit SHA. The daemon then:
+
+- pushes your owned `revis/<operator>/agent-*/work` branches
+- fetches remote `revis/*/agent-*/work` branches
+- relays unseen commit summaries into your local tmux sessions
+- rebases owned workspaces onto the current sync target when trunk advances
+
+For local `revis-local` coordination, the sync target is `revis/trunk`. For a real shared remote, the sync target is the configured base branch.
+
+## Branch Model
+
+Workspace branches are always:
+
 ```text
-src/revis/
-├── __init__.py
-├── __main__.py
-├── agent/
-│   ├── credentials.py      # Auth detection for Codex CLI sessions
-│   ├── instructions.py     # Skill and protocol file generation per sandbox
-│   └── templates.py        # AGENTS.md, protocol.md, objective.md templates
-├── coordination/
-│   ├── bootstrap.py        # Seed shared trunk/findings branches during init
-│   ├── daemon.py           # Background sync loop (findings fetch, provider-specific rebase, heartbeat)
-│   ├── findings.py         # Filter/render findings into repo-local dashboards
-│   ├── ledger.py           # Findings branch append/read/parse helpers
-│   ├── promotion.py        # Managed-trunk promotion and GitHub PR helpers
-│   ├── repo.py             # Repo discovery, remotes, branches, and worktrees
-│   ├── runtime.py          # Agent registry, event log, daemon health tracking
-│   ├── runtime_ops.py      # Runtime refresh/mirroring helpers above persistence
-│   ├── sandbox_meta.py     # Per-sandbox state (agent ID, branch, attach command)
-│   ├── setup.py            # Init-time remote selection and gitignore helpers
-│   ├── spawning.py         # Non-interactive spawn planning and launch flow
-│   └── sync.py             # Sync target selection and rebase helpers
-├── core/
-│   ├── config.py           # Read/write .revis/config.toml
-│   ├── models.py           # Shared data models (AgentInfo, Finding, etc.)
-│   └── util.py             # Subprocess helpers, timestamp formatting
-├── sandbox/
-│   ├── base.py             # Abstract SandboxProvider interface
-│   ├── daytona.py          # Daytona workspace lifecycle adapter
-│   └── local.py            # Local git clone + tmux session adapter
-└── cli/
-    ├── main.py             # Typer commands (init, spawn, log, findings, sync, promote, status, stop)
-    └── monitor.py          # Textual TUI (live dashboard, agent attach)
+revis/<operator>/agent-<n>/work
 ```
 
-[^1]: "Research problem" here just means any loop where you change something, measure the result, and decide what to try next. Training an ML model and checking if validation loss improved, tuning a codebase and benchmarking if it got faster, adjusting reward functions and evaluating if your agent performs better, the list goes on. Revis makes this loop parallel and collaborative; instead of one agent iterating serially, N agents explore different directions at once, and when one finds something, the rest learn from it immediately.
+The operator slug comes from local git identity:
+
+- first `git config user.email` local-part
+- then `git config user.name`
+- slugified to lowercase alphanumeric and hyphen
+
+This means multiple operators can share the same remote without colliding. Revis treats the single-operator and multi-operator cases as the same code path.
+
+## Promotion
+
+`revis promote <agent-id>` is operator-only.
+
+- In managed-trunk mode (`revis-local`), Revis merges that workspace branch into `revis/trunk`, then the daemon rebases the other local workspaces onto the new trunk head.
+- Against a real shared remote, Revis pushes the branch and opens or reuses a GitHub pull request targeting the configured base branch.
+
+## Runtime Files
+
+Revis keeps local runtime state under `.revis/`:
+
+```text
+.revis/
+  config.json
+  coordination.git/        # only in revis-local mode
+  runtime/
+    daemon.json
+    relays.json
+    events.jsonl
+    workspaces/
+    activity/
+  workspaces/
+    agent-1/
+      repo/
+        .revis/
+          agent.json
+          last-relayed-sha
+          hook-client.cjs
+```
+
+These files are local operator state. `revis init` adds the local runtime paths to `.gitignore`.
+
+## Status And Monitor
+
+`revis status` prints:
+
+- daemon health and socket path
+- operator slug, remote, and sync base
+- one line per workspace with branch, state, recent SHAs, queued steering count, attach command, and latest activity
+
+`revis monitor` opens an Ink TUI with:
+
+- daemon and repo summary
+- workspace list
+- activity for the selected workspace
+- recent runtime events
+
+Use `Enter` or `a` to attach to a workspace tmux session, `j`/`k` to move, and `q` to quit.
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+npm test
+npm run build
+```
