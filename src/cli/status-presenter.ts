@@ -31,7 +31,8 @@ export function formatWorkspaceSummary(workspace: WorkspaceRecord): string {
   return [
     workspace.agentId,
     `[${workspace.state}]`,
-    workspace.branch,
+    `coord=${workspace.coordinationBranch}`,
+    `local=${workspace.localBranch}`,
     ...fields
   ].join(" ");
 }

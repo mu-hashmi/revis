@@ -53,6 +53,7 @@ import {
 
 const START_TIMEOUT_MS = 10_000;
 const SOCKET_CONNECT_TIMEOUT_MS = 400;
+const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
 const DAEMON_READY_LINE = "REVIS_DAEMON_READY";
 const EXPECTED_SOCKET_CONNECT_ERRORS = new Set([
   "ECONNREFUSED",
@@ -170,7 +171,7 @@ async function sendDaemonRequest(
       fn();
     };
 
-    socket.setTimeout(SOCKET_CONNECT_TIMEOUT_MS, () => {
+    socket.setTimeout(SOCKET_REQUEST_TIMEOUT_MS, () => {
       socket.destroy();
       settle(() =>
         reject(new RevisError(`Timed out writing to daemon socket ${socketPath}`))
@@ -608,7 +609,8 @@ export class RevisDaemon {
       const pushedSha = await pushBranch(
         record.repoPath,
         this.config.coordinationRemote,
-        record.branch
+        "HEAD",
+        record.coordinationBranch
       );
       record.lastPushedSha = pushedSha;
       record.lastCommitSha = pushedSha;
@@ -618,8 +620,8 @@ export class RevisDaemon {
         timestamp: isoNow(),
         type: "branch_pushed",
         agentId: record.agentId,
-        branch: record.branch,
-        summary: `Pushed ${record.branch} at ${pushedSha.slice(0, 8)}`
+        branch: record.coordinationBranch,
+        summary: `Pushed ${record.coordinationBranch} at ${pushedSha.slice(0, 8)}`
       });
     }
   }
@@ -634,7 +636,7 @@ export class RevisDaemon {
     };
 
     for (const record of workspaces) {
-      if (seeded.byBranch[record.branch]) {
+      if (seeded.byBranch[record.coordinationBranch]) {
         continue;
       }
 
@@ -642,7 +644,9 @@ export class RevisDaemon {
         continue;
       }
 
-      seeded.byBranch[record.branch] = await readLastRelayedSha(record.repoPath);
+      seeded.byBranch[record.coordinationBranch] = await readLastRelayedSha(
+        record.repoPath
+      );
     }
 
     return seeded;
@@ -678,7 +682,7 @@ export class RevisDaemon {
         return true;
       }
 
-      return record.branch !== summary.branch;
+      return record.coordinationBranch !== summary.branch;
     });
 
     const message = this.formatCommitRelay(summary);
@@ -792,7 +796,7 @@ export class RevisDaemon {
       timestamp: isoNow(),
       type,
       agentId: record.agentId,
-      branch: record.branch,
+      branch: record.coordinationBranch,
       summary
     });
     await sendSteeringMessage(this.root, record, message);
@@ -815,7 +819,9 @@ export class RevisDaemon {
     operatorSlug: string,
     head: { branch: string; sha: string }
   ): Promise<void> {
-    const record = workspaces.find((workspace) => workspace.branch === head.branch);
+    const record = workspaces.find(
+      (workspace) => workspace.coordinationBranch === head.branch
+    );
     if (record) {
       record.lastSeenRemoteSha = head.sha;
       await writeWorkspaceRecord(this.root, record);
@@ -859,8 +865,8 @@ function parseSocketNotifications(buffer: string): CommitNotification[] {
 /** Validate one daemon notification instead of normalizing malformed payloads. */
 function validateNotification(notification: CommitNotification): CommitNotification {
   if (notification.type === "commit") {
-    if (!notification.agentId || !notification.branch || !notification.sha) {
-      throw new RevisError("Commit notifications must include agentId, branch, and sha");
+    if (!notification.agentId || !notification.sha) {
+      throw new RevisError("Commit notifications must include agentId and sha");
     }
 
     return notification;

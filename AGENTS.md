@@ -2,8 +2,6 @@
 
 Revis is a passive coordination CLI for tmux-backed coding agent workspaces. Agents inside those workspaces are not supposed to know Revis exists.
 
-Currently only supports Codex, but plans to add support for other providers in the future.
-
 ## Scope
 
 Revis owns three things:
@@ -51,11 +49,13 @@ Current important modules:
 
 ## Product invariants
 
-- Workspace branches are always `revis/<operator>/agent-<n>/work`.
+- Workspace coordination refs are always `revis/<operator>/agent-<n>/work`.
+- A workspace's checked-out local branch may differ from its coordination ref.
 - The operator slug comes from local git identity.
 - `revis init` prefers `origin`, otherwise the sole remote, otherwise creates `.revis/coordination.git` as `revis-local`.
 - Local workspaces live under `.revis/workspaces/agent-<n>/repo`.
 - Workspace `post-commit` hooks notify the daemon over local IPC.
+- `revis spawn` is the only public command that creates workspaces; `--exec` is optional and agent-agnostic.
 - The daemon is event-driven for local commits and poll-driven for remote discovery.
 - Promotion is operator-only.
 - Agents do not run `revis` commands inside their sessions.
@@ -88,18 +88,18 @@ Primary commands:
 Current test files:
 
 - `tests/coordination.test.ts`
-  - workspace creation, hook installation, daemon relay, cross-operator sync
+  - workspace creation, local-branch switching, daemon relay, cross-operator sync
 - `tests/promotion.test.ts`
   - managed-trunk promotion, rebase propagation, GitHub PR reuse flow
 - `tests/ui.test.tsx`
-  - `status`, `monitor`, and `stop`
+  - `status`, `monitor`, `spawn`, and `stop`
 
 ## Live smokes
 
 Keep these as opt-in manual checks, not normal suite tests:
 
-- `revis init`, `revis workspace N`, and `revis spawn --codex N` against a real tmux/Codex environment
-- commit-hook relay into live Codex sessions
+- `revis init`, `revis spawn N`, and `revis spawn N --exec '<command>'` against a real tmux/agent environment
+- commit-hook relay into live agent sessions
 - shared-remote multi-operator sync against a real git remote
 - `revis promote <agent-id>` against a real GitHub remote and `gh`
 - monitor attach behavior in a real terminal

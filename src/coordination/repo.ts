@@ -392,18 +392,19 @@ export async function commitSummaryForRef(
   };
 }
 
-/** Push one local branch to the coordination remote. */
+/** Push one local ref to a named coordination branch on the remote. */
 export async function pushBranch(
   repoPath: string,
   remoteName: string,
-  branch: string
+  sourceRef: string,
+  destinationBranch = sourceRef
 ): Promise<string> {
   await gitClient(repoPath).raw([
     "push",
     "--force-with-lease",
     "-u",
     remoteName,
-    `${branch}:refs/heads/${branch}`
+    `${sourceRef}:refs/heads/${destinationBranch}`
   ]);
   return currentHeadSha(repoPath);
 }

@@ -8,7 +8,7 @@ import { saveConfig } from "../src/core/config";
 import type { RevisConfig } from "../src/core/models";
 import { daemonSocketPath } from "../src/core/ipc";
 import { runCommand, sleep } from "../src/core/process";
-import { RevisDaemon } from "../src/coordination/daemon";
+import { RevisDaemon, stopDaemon } from "../src/coordination/daemon";
 import { initializeProject } from "../src/coordination/setup";
 import { loadStatusSnapshot } from "../src/coordination/status";
 import { clearRuntime, loadWorkspaceRecords } from "../src/coordination/runtime";
@@ -171,6 +171,8 @@ export async function cleanupRepo(
 ): Promise<void> {
   if (daemon) {
     await daemon.stop();
+  } else {
+    await stopDaemon(root);
   }
 
   const workspaces = await loadWorkspaceRecords(root);

@@ -24,7 +24,7 @@ export interface PromotionResult {
 
 interface PromotionTarget {
   agentId: string;
-  branch: string;
+  coordinationBranch: string;
   repoPath: string;
 }
 
@@ -35,7 +35,12 @@ export async function promoteWorkspace(
   agentId: string
 ): Promise<PromotionResult> {
   const target = await loadPromotionTarget(root, agentId);
-  await pushBranch(target.repoPath, config.coordinationRemote, target.branch);
+  await pushBranch(
+    target.repoPath,
+    config.coordinationRemote,
+    "HEAD",
+    target.coordinationBranch
+  );
 
   if (usesManagedTrunk(config.coordinationRemote)) {
     return promoteManagedWorkspace(root, config, target);
@@ -56,7 +61,7 @@ async function loadPromotionTarget(
     throw new RevisError(`Unknown workspace ${agentId}`);
   }
 
-  if (workspace.branch !== branch) {
+  if (workspace.coordinationBranch !== branch) {
     throw new RevisError(
       `Workspace ${agentId} belongs to ${workspace.operatorSlug}, not ${operatorSlug}`
     );
@@ -64,7 +69,7 @@ async function loadPromotionTarget(
 
   return {
     agentId,
-    branch,
+    coordinationBranch: branch,
     repoPath: workspace.repoPath
   };
 }
@@ -78,12 +83,12 @@ async function promoteManagedWorkspace(
   const summary = await mergeIntoManagedTrunk(
     root,
     config.coordinationRemote,
-    target.branch
+    target.coordinationBranch
   );
   await appendPromotedEvent(
     root,
     target,
-    `Promoted ${target.branch} into ${TRUNK_BRANCH}`
+    `Promoted ${target.coordinationBranch} into ${TRUNK_BRANCH}`
   );
   await ensureDaemonRunning(root);
   await notifyDaemon(root, {
@@ -105,14 +110,14 @@ async function promotePullRequestWorkspace(
   const pr = await createOrReusePullRequest(
     root,
     config,
-    target.branch,
+    target.coordinationBranch,
     config.trunkBase,
     await latestCommitSubject(target.repoPath)
   );
   await appendPromotedEvent(
     root,
     target,
-    `${pr.created ? "Opened" : "Reused"} PR #${pr.number} for ${target.branch}`
+    `${pr.created ? "Opened" : "Reused"} PR #${pr.number} for ${target.coordinationBranch}`
   );
   return {
     mode: "pull_request",
@@ -133,7 +138,7 @@ async function appendPromotedEvent(
     timestamp: isoNow(),
     type: "promoted",
     agentId: target.agentId,
-    branch: target.branch,
+    branch: target.coordinationBranch,
     summary
   });
 }

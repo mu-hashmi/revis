@@ -3,7 +3,7 @@
 import { join } from "node:path";
 
 import type { RevisConfig } from "../core/models";
-import { saveConfig, defaultCodexTemplate, DEFAULT_REMOTE_POLL_SECONDS } from "../core/config";
+import { saveConfig, DEFAULT_REMOTE_POLL_SECONDS } from "../core/config";
 import { appendMissingLines } from "../core/text-files";
 import {
   bootstrapCoordinationRemote,
@@ -19,7 +19,6 @@ export async function buildDefaultConfig(root: string): Promise<RevisConfig> {
   return {
     coordinationRemote: remoteName,
     trunkBase: await currentBranch(root),
-    codexTemplate: defaultCodexTemplate(),
     remotePollSeconds: DEFAULT_REMOTE_POLL_SECONDS
   };
 }

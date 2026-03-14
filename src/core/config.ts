@@ -2,26 +2,13 @@
 
 import { join } from "node:path";
 
-import type { AgentTemplate, RevisConfig } from "./models";
+import type { RevisConfig } from "./models";
 import { RevisError } from "./error";
 import { pathExists, readJson, writeJson } from "./files";
 
 export const CONFIG_DIR = ".revis";
 export const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 export const DEFAULT_REMOTE_POLL_SECONDS = 5;
-
-/** Return the default Codex launch template. */
-export function defaultCodexTemplate(): AgentTemplate {
-  return {
-    argv: [
-      "codex",
-      "-c",
-      'trust_level="trusted"',
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--search"
-    ]
-  };
-}
 
 /** Return whether a Revis config file already exists. */
 export async function configExists(root: string): Promise<boolean> {
@@ -39,7 +26,6 @@ export async function loadConfig(root: string): Promise<RevisConfig> {
   return {
     coordinationRemote: requiredString(data.coordinationRemote, "coordinationRemote"),
     trunkBase: requiredString(data.trunkBase, "trunkBase"),
-    codexTemplate: requiredTemplate(data.codexTemplate),
     remotePollSeconds: requiredPositiveInteger(
       data.remotePollSeconds,
       "remotePollSeconds"
@@ -61,15 +47,6 @@ export async function saveConfig(
 function requiredString(value: string | undefined, name: string): string {
   if (!value) {
     throw new RevisError(`Config is missing ${name}`);
-  }
-
-  return value;
-}
-
-/** Require the persisted Codex launch template. */
-function requiredTemplate(value: AgentTemplate | undefined): AgentTemplate {
-  if (!value || value.argv.length === 0) {
-    throw new RevisError("Config is missing codexTemplate.argv");
   }
 
   return value;

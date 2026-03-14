@@ -82,7 +82,10 @@ export async function loadWorkspaceRecord(
   root: string,
   agentId: string
 ): Promise<WorkspaceRecord | null> {
-  return loadRuntimeJsonOrNull(workspaceRecordPath(root, agentId));
+  const record = await loadRuntimeJsonOrNull<WorkspaceRecord | LegacyWorkspaceRecord>(
+    workspaceRecordPath(root, agentId)
+  );
+  return record ? normalizeWorkspaceRecord(record) : null;
 }
 
 /** Load every workspace runtime record. */
@@ -98,7 +101,11 @@ export async function loadWorkspaceRecords(root: string): Promise<WorkspaceRecor
     entries
       .filter((entry) => entry.endsWith(".json"))
       .sort()
-      .map((entry) => readJson<WorkspaceRecord>(join(directory, entry)))
+      .map(async (entry) =>
+        normalizeWorkspaceRecord(
+          await readJson<WorkspaceRecord | LegacyWorkspaceRecord>(join(directory, entry))
+        )
+      )
   );
   return records;
 }
@@ -119,6 +126,14 @@ export async function loadDaemonRecord(root: string): Promise<DaemonRecord | nul
 /** Remove persisted daemon runtime state. */
 export async function deleteDaemonRecord(root: string): Promise<void> {
   await rm(daemonRecordPath(root), { force: true });
+}
+
+/** Remove one persisted workspace runtime record. */
+export async function deleteWorkspaceRecord(
+  root: string,
+  agentId: string
+): Promise<void> {
+  await rm(workspaceRecordPath(root, agentId), { force: true });
 }
 
 /** Persist relay dedupe state. */
@@ -203,6 +218,14 @@ export async function loadActivity(
   return (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
 }
 
+/** Remove one persisted workspace activity snapshot. */
+export async function deleteActivitySnapshot(
+  root: string,
+  agentId: string
+): Promise<void> {
+  await rm(activityPath(root, agentId), { force: true });
+}
+
 /** Remove all persisted runtime state. */
 export async function clearRuntime(root: string): Promise<void> {
   await rm(runtimeDir(root), { recursive: true, force: true });
@@ -225,6 +248,25 @@ async function loadRuntimeJsonOrNull<T>(path: string): Promise<T | null> {
   }
 
   return readJson<T>(path);
+}
+
+interface LegacyWorkspaceRecord extends Omit<WorkspaceRecord, "coordinationBranch" | "localBranch"> {
+  branch: string;
+}
+
+/** Normalize persisted workspace records across branch-model changes. */
+function normalizeWorkspaceRecord(
+  record: WorkspaceRecord | LegacyWorkspaceRecord
+): WorkspaceRecord {
+  if ("coordinationBranch" in record && "localBranch" in record) {
+    return record;
+  }
+
+  return {
+    ...record,
+    coordinationBranch: record.branch,
+    localBranch: record.branch
+  };
 }
 
 /** Trim activity lines to the configured line and byte budgets. */

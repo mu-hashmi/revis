@@ -2,9 +2,16 @@
 
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { buildCli } from "../src/cli/app";
 import { ensureDir } from "../src/core/files";
+import { runCommand } from "../src/core/process";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const builtCliPath = fileURLToPath(new URL("../dist/bin/revis.js", import.meta.url));
+
+let builtCliReady: Promise<string> | null = null;
 
 /** Run the Commander CLI in-process and capture stdout/stderr. */
 export async function runCli(
@@ -12,10 +19,12 @@ export async function runCli(
   args: string[]
 ): Promise<{ stdout: string; stderr: string }> {
   const cwd = process.cwd();
+  const originalExecutable = process.env.REVIS_EXECUTABLE;
   let stdout = "";
   let stderr = "";
 
   process.chdir(root);
+  process.env.REVIS_EXECUTABLE = await ensureBuiltCli();
 
   try {
     await buildCli({
@@ -29,10 +38,23 @@ export async function runCli(
       from: "user"
     });
   } finally {
+    process.env.REVIS_EXECUTABLE = originalExecutable;
     process.chdir(cwd);
   }
 
   return { stdout, stderr };
+}
+
+/** Build the packaged Revis CLI once so detached daemon tests use the real bin entrypoint. */
+async function ensureBuiltCli(): Promise<string> {
+  if (!builtCliReady) {
+    builtCliReady = (async () => {
+      await runCommand(["npm", "run", "build"], { cwd: repoRoot });
+      return builtCliPath;
+    })();
+  }
+
+  return builtCliReady;
 }
 
 /** Create a Node-based fake `gh` executable for promotion tests. */

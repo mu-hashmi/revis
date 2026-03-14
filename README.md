@@ -1,12 +1,12 @@
 # Revis
 
-Revis is a passive coordination layer for parallel coding agent workspaces.
+Revis is a passive coordination layer for parallel coding-agent workspaces.
 
 It does three things:
 
-1. creates isolated local clones on namespaced branches like `revis/alice/agent-3/work`
-2. runs a daemon that pushes local workspace branches, fetches everyone else's `revis/*` branches, and relays commit summaries into your local tmux sessions
-3. lets the operator promote a chosen workspace branch
+1. creates isolated local clones with stable coordination refs like `revis/alice/agent-3/work`
+2. runs a daemon that pushes those coordination refs, fetches everyone else's `revis/*` refs, and relays commit summaries into your local tmux sessions
+3. lets the operator promote a chosen workspace into trunk or into a pull request
 
 ## Install
 
@@ -25,19 +25,19 @@ npm install -g revis
 - Node 20+
 - `git`
 - `tmux`
-- `codex` on your `PATH` if you want `revis spawn --codex`
 - `gh` on your `PATH` if you want PR-based promotion against a GitHub remote
 
 ## Commands
 
 ```bash
 revis init
-revis workspace 4
-revis spawn --codex 4
+revis spawn 4
+revis spawn 4 --exec 'codex --yolo'
 revis status
 revis monitor
 revis promote agent-2
-revis stop
+revis stop agent-2
+revis stop --all
 revis version
 ```
 
@@ -45,13 +45,14 @@ revis version
 
 ```bash
 revis init
-revis workspace 4
-revis spawn --codex 4
+revis spawn 4 --exec 'codex --yolo'
 revis status
 revis monitor
 ```
 
-If you only want the workspace shells and daemon, use `revis workspace N`. If you want Revis to also launch Codex in each tmux session, use `revis spawn --codex N`.
+If you only want the workspaces and daemon, use `revis spawn N`.
+
+If you want Revis to also start something inside each workspace, use `revis spawn N --exec '<command>'`. Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a tmux pane.
 
 ## How It Works
 
@@ -65,17 +66,18 @@ It also writes `.revis/config.json` with:
 
 - `coordinationRemote`
 - `trunkBase`
-- `codexTemplate`
 - `remotePollSeconds`
 
-`revis workspace N` creates `N` local clones under `.revis/workspaces/agent-N/repo`, creates a tmux session per workspace, installs a `post-commit` hook, writes workspace runtime metadata, and ensures the daemon is running.
+`revis spawn N` creates `N` local clones under `.revis/workspaces/agent-N/repo`, creates a tmux session per workspace, installs a `post-commit` hook, writes workspace runtime metadata, and ensures the daemon is running.
 
-`revis spawn --codex N` does the same setup and then launches the configured Codex command in each tmux session.
+`revis spawn N --exec '<command>'` does the same setup and then types that command into each workspace tmux pane.
 
-The daemon listens on a Unix domain socket on Unix-like systems and on a named pipe on Windows. Every workspace `post-commit` hook notifies the daemon immediately with the workspace id, branch, and new commit SHA. The daemon then:
+`revis stop <agent-id>` stops one workspace. `revis stop --all` tears down every workspace plus the daemon.
 
-- pushes your owned `revis/<operator>/agent-*/work` branches
-- fetches remote `revis/*/agent-*/work` branches
+The daemon listens on a Unix domain socket on Unix-like systems and on a named pipe on Windows. Every workspace `post-commit` hook notifies the daemon immediately with the workspace id and new commit SHA. The daemon then:
+
+- pushes each workspace's current `HEAD` to its owned `revis/<operator>/agent-*/work` coordination ref
+- fetches remote `revis/*/agent-*/work` refs
 - relays unseen commit summaries into your local tmux sessions
 - rebases owned workspaces onto the current sync target when trunk advances
 
@@ -83,11 +85,17 @@ For local `revis-local` coordination, the sync target is `revis/trunk`. For a re
 
 ## Branch Model
 
-Workspace branches are always:
+Each workspace has two branch concepts:
+
+- a stable coordination ref owned by Revis:
 
 ```text
 revis/<operator>/agent-<n>/work
 ```
+
+- the workspace repo's current local branch, which the agent may change freely
+
+Revis always publishes the workspace's current `HEAD` to that stable coordination ref. That means repo-specific workflows can use their own local branch names without breaking Revis relay behavior.
 
 The operator slug comes from local git identity:
 
@@ -95,14 +103,16 @@ The operator slug comes from local git identity:
 - then `git config user.name`
 - slugified to lowercase alphanumeric and hyphen
 
-This means multiple operators can share the same remote without colliding. Revis treats the single-operator and multi-operator cases as the same code path.
+This lets multiple operators share the same remote without colliding.
 
 ## Promotion
 
 `revis promote <agent-id>` is operator-only.
 
-- In managed-trunk mode (`revis-local`), Revis merges that workspace branch into `revis/trunk`, then the daemon rebases the other local workspaces onto the new trunk head.
-- Against a real shared remote, Revis pushes the branch and opens or reuses a GitHub pull request targeting the configured base branch.
+Before promotion, Revis pushes the workspace's current `HEAD` to its stable coordination ref.
+
+- In managed-trunk mode (`revis-local`), Revis merges that coordination ref into `revis/trunk`, then the daemon rebases the other local workspaces onto the new trunk head.
+- Against a real shared remote, Revis pushes the coordination ref and opens or reuses a GitHub pull request targeting the configured base branch.
 
 ## Runtime Files
 
@@ -135,7 +145,7 @@ These files are local operator state. `revis init` adds the local runtime paths 
 
 - daemon health and socket path
 - operator slug, remote, and sync base
-- one line per workspace with branch, state, recent SHAs, queued steering count, attach command, and latest activity
+- one line per workspace with coordination ref, local branch, state, recent SHAs, queued steering count, attach command, and latest activity
 
 `revis monitor` opens an Ink TUI with:
 

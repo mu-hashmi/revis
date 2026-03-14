@@ -15,6 +15,7 @@ import { initializeProject } from "../coordination/setup";
 import { loadStatusSnapshot } from "../coordination/status";
 import {
   prepareWorkspaceBatch,
+  stopWorkspace,
   stopWorkspaceBatch
 } from "../coordination/workspace-batch";
 import {
@@ -43,7 +44,7 @@ export function buildCli(io: CliWriters = {}): Command {
   program
     .name("revis")
     .description(
-      "Passive distributed workspace coordination for tmux-backed Codex sessions."
+      "Passive distributed workspace coordination for tmux-backed agent sessions."
     )
     .configureOutput({
       writeErr,
@@ -59,22 +60,16 @@ export function buildCli(io: CliWriters = {}): Command {
     writeOut(`Remote: ${config.coordinationRemote}\n`);
     writeOut(`Base branch: ${config.trunkBase}\n`);
     writeOut(`Daemon poll seconds: ${config.remotePollSeconds}\n`);
+    writeOut(`Next: revis spawn 1 or revis spawn 1 --exec '<command>'\n`);
   });
 
   program
-    .command("workspace")
-    .description("Create isolated workspaces and start the daemon.")
-    .argument("<count>", "number of workspaces to create")
-    .action(async (countText: string) => {
-      await runBatchCommand(parseCount(countText), false, writeOut);
-    });
-
-  program
     .command("spawn")
-    .description("Create workspaces and launch Codex in each one.")
-    .requiredOption("--codex <count>", "number of Codex workspaces to launch")
-    .action(async (options: { codex: string }) => {
-      await runBatchCommand(parseCount(options.codex), true, writeOut);
+    .description("Create isolated workspaces, start the daemon, and optionally run a command.")
+    .argument("<count>", "number of workspaces to create")
+    .option("--exec <command>", "shell command to run in each workspace")
+    .action(async (countText: string, options: { exec?: string }) => {
+      await runBatchCommand(parseCount(countText), options.exec, writeOut);
     });
 
   program.command("status").description("Show daemon and workspace status.").action(async () => {
@@ -94,9 +89,7 @@ export function buildCli(io: CliWriters = {}): Command {
     for (const workspace of snapshot.workspaces) {
       const activity = snapshot.activity[workspace.agentId]!;
       const activityLine = activity.at(-1) ?? "";
-      writeOut(
-        formatStatusWorkspaceLine(workspace, activityLine) + "\n"
-      );
+      writeOut(`${formatStatusWorkspaceLine(workspace, activityLine)}\n`);
     }
   });
 
@@ -107,7 +100,7 @@ export function buildCli(io: CliWriters = {}): Command {
 
   program
     .command("promote")
-    .description("Promote one workspace branch.")
+    .description("Promote one workspace.")
     .argument("<agent-id>", "workspace identifier")
     .action(async (agentId: string) => {
       const { config, root } = await loadCommandContext();
@@ -118,10 +111,32 @@ export function buildCli(io: CliWriters = {}): Command {
       }
     });
 
-  program.command("stop").description("Stop the daemon and tear down workspaces.").action(async () => {
-    const root = await resolveRepoRoot(process.cwd());
-    writeOut(`Stopped ${await stopWorkspaceBatch(root)} workspaces\n`);
-  });
+  program
+    .command("stop")
+    .description("Stop one workspace or every workspace plus the daemon.")
+    .argument("[agent-id]", "workspace identifier")
+    .option("--all", "stop every workspace and the daemon")
+    .action(async (agentId: string | undefined, options: { all?: boolean }) => {
+      const root = await resolveRepoRoot(process.cwd());
+
+      if (options.all) {
+        if (agentId) {
+          throw new RevisError("Use either `revis stop --all` or `revis stop <agent-id>`.");
+        }
+
+        writeOut(`Stopped ${await stopWorkspaceBatch(root)} workspaces\n`);
+        return;
+      }
+
+      if (!agentId) {
+        throw new RevisError(
+          "Specify a workspace: run `revis stop --all` to stop everything or `revis stop <agent-id>` to stop one workspace."
+        );
+      }
+
+      await stopWorkspace(root, agentId);
+      writeOut(`Stopped ${agentId}\n`);
+    });
 
   program.command("version").description("Print the installed Revis version.").action(async () => {
     writeOut(`${await packageVersion()}\n`);
@@ -164,20 +179,20 @@ function parseCount(value: string): number {
   return count;
 }
 
-/** Create or spawn a workspace batch and print the resulting sessions. */
+/** Create a workspace batch and print the resulting sessions. */
 async function runBatchCommand(
   count: number,
-  launchCodex: boolean,
+  execCommand: string | undefined,
   writeOut: (text: string) => void
 ): Promise<void> {
   const { config, root } = await loadCommandContext();
   const created = await prepareWorkspaceBatch(root, config, {
     count,
-    launchCodex
+    ...(execCommand ? { execCommand } : {})
   });
 
   for (const workspace of created) {
-    writeOut(`${formatBatchResult(workspace, launchCodex)}\n`);
+    writeOut(`${formatBatchResult(workspace, execCommand)}\n`);
   }
 }
 
@@ -201,13 +216,13 @@ function formatStatusWorkspaceLine(
   return `${formatWorkspaceSummary(workspace)} | ${extras.join(" | ")}`;
 }
 
-/** Format one workspace line for the `workspace` and `spawn` commands. */
+/** Format one workspace line for the `spawn` command. */
 function formatBatchResult(
   workspace: WorkspaceRecord,
-  launchCodex: boolean
+  execCommand: string | undefined
 ): string {
-  const prefix = launchCodex
+  const prefix = execCommand
     ? `${workspace.agentId} launched`
-    : `${workspace.agentId} ${workspace.branch}`;
-  return `${prefix} ${workspace.attachCmd.join(" ")}`;
+    : `${workspace.agentId} ${workspace.coordinationBranch}`;
+  return `${prefix} local=${workspace.localBranch} ${workspace.attachCmd.join(" ")}`;
 }

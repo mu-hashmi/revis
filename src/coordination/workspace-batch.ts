@@ -1,28 +1,25 @@
 /** Workspace batch orchestration shared by CLI entrypoints. */
 
 import type { RevisConfig, WorkspaceRecord } from "../core/models";
+import { RevisError } from "../core/error";
 import { daemonSocketPath } from "../core/ipc";
 import { runCommand } from "../core/process";
 import { ensureDaemonRunning, notifyDaemon, stopDaemon } from "./daemon";
-import { clearRuntime, loadWorkspaceRecords } from "./runtime";
-import { createWorkspaces, launchCodexInWorkspaces } from "./workspaces";
-import { stopWorkspaces } from "./workspaces";
+import { clearRuntime, loadWorkspaceRecord, loadWorkspaceRecords } from "./runtime";
+import { createWorkspaces, runCommandInWorkspaces, stopWorkspaces } from "./workspaces";
 
 export interface WorkspaceBatchOptions {
   count: number;
-  launchCodex: boolean;
+  execCommand?: string;
 }
 
-/** Create workspaces, start the daemon, and optionally launch Codex. */
+/** Create workspaces, start the daemon, and optionally run a command in each one. */
 export async function prepareWorkspaceBatch(
   root: string,
   config: RevisConfig,
   options: WorkspaceBatchOptions
 ): Promise<WorkspaceRecord[]> {
   await ensureTmuxReady();
-  if (options.launchCodex) {
-    await ensureCodexReady();
-  }
 
   const created = await createWorkspaces(
     root,
@@ -32,15 +29,37 @@ export async function prepareWorkspaceBatch(
   );
   await ensureDaemonRunning(root);
 
-  if (options.launchCodex) {
-    await launchCodexInWorkspaces(root, config, created);
+  if (options.execCommand) {
+    await runCommandInWorkspaces(root, created, options.execCommand);
   }
 
   await notifyDaemon(root, {
     type: "sync",
-    reason: options.launchCodex ? "spawn" : "workspace"
+    reason: options.execCommand ? "spawn-exec" : "spawn"
   });
   return created;
+}
+
+/** Tear down one workspace and stop the daemon when no workspaces remain. */
+export async function stopWorkspace(root: string, agentId: string): Promise<void> {
+  const record = await loadWorkspaceRecord(root, agentId);
+  if (!record) {
+    throw new RevisError(`Unknown workspace ${agentId}`);
+  }
+
+  await stopDaemon(root);
+  await stopWorkspaces(root, [record]);
+
+  if ((await loadWorkspaceRecords(root)).length > 0) {
+    await ensureDaemonRunning(root);
+    await notifyDaemon(root, {
+      type: "sync",
+      reason: "stop-workspace"
+    });
+    return;
+  }
+
+  await clearRuntime(root);
 }
 
 /** Tear down every workspace plus the daemon for one initialized repository. */
@@ -55,9 +74,4 @@ export async function stopWorkspaceBatch(root: string): Promise<number> {
 /** Fail fast when tmux is unavailable. */
 async function ensureTmuxReady(): Promise<void> {
   await runCommand(["tmux", "-V"]);
-}
-
-/** Fail fast when the local Codex executable is unavailable. */
-async function ensureCodexReady(): Promise<void> {
-  await runCommand(["codex", "--version"]);
 }

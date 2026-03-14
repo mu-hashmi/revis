@@ -3,12 +3,16 @@ import { render } from "ink-testing-library";
 
 import { MonitorApp } from "../src/cli/monitor";
 import { pathExists } from "../src/core/files";
+import { runCommand } from "../src/core/process";
+import { loadWorkspaceRecords } from "../src/coordination/runtime";
 import { tmuxSessionExists } from "../src/coordination/workspaces";
 import { runCli } from "./cli-helpers";
 import {
   cleanupRepo,
   createCleanupStack,
+  createRepo,
   createWorkspaceHarness,
+  initializeRevis,
   waitFor
 } from "./helpers";
 
@@ -30,7 +34,8 @@ describe("operator status and monitor", () => {
     const result = await runCli(root, ["status"]);
     expect(result.stdout).toContain("daemon up");
     expect(result.stdout).toContain("agent-1");
-    expect(result.stdout).toContain("revis/alice/agent-1/work");
+    expect(result.stdout).toContain("coord=revis/alice/agent-1/work");
+    expect(result.stdout).toContain("local=revis/alice/agent-1/work");
   });
 
   test("monitor renders workspace state and exits on q", async () => {
@@ -63,22 +68,89 @@ describe("operator status and monitor", () => {
     app.unmount();
   });
 
-  test("stop tears down tmux sessions and runtime state", async () => {
-    const { root, workspaces } = await createWorkspaceHarness({
-      count: 1,
-      startDaemon: false,
-      user: {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      }
+  test("spawn creates workspaces and can run a supplied command", async () => {
+    const root = await createRepo({
+      userName: "Alice Example",
+      userEmail: "alice@example.com"
     });
+    await initializeRevis(root);
     cleanups.add(() => cleanupRepo(root));
 
-    expect(await tmuxSessionExists(workspaces[0]!.tmuxSession)).toBe(true);
+    const result = await runCli(root, [
+      "spawn",
+      "1",
+      "--exec",
+      "printf 'hello-from-exec\\n'"
+    ]);
 
-    const result = await runCli(root, ["stop"]);
-    expect(result.stdout).toContain("Stopped 1 workspaces");
+    expect(result.stdout).toContain("agent-1 launched");
+
+    await waitFor(async () => (await loadWorkspaceRecords(root)).length === 1);
+    const [workspace] = await loadWorkspaceRecords(root);
+    expect(workspace?.coordinationBranch).toBe("revis/alice/agent-1/work");
+
+    await waitFor(async () => {
+      const pane = await runCommand([
+        "tmux",
+        "capture-pane",
+        "-t",
+        `${workspace!.tmuxSession}:0`,
+        "-p"
+      ]);
+      return pane.stdout.includes("hello-from-exec");
+    });
+  });
+
+  test("stop errors without a target", async () => {
+    const root = await createRepo({
+      userName: "Alice Example",
+      userEmail: "alice@example.com"
+    });
+    await initializeRevis(root);
+    cleanups.add(() => cleanupRepo(root));
+
+    await expect(runCli(root, ["stop"])).rejects.toThrow(
+      "Specify a workspace: run `revis stop --all` to stop everything or `revis stop <agent-id>` to stop one workspace."
+    );
+  });
+
+  test("stop can tear down one workspace without stopping the others", async () => {
+    const root = await createRepo({
+      userName: "Alice Example",
+      userEmail: "alice@example.com"
+    });
+    await initializeRevis(root);
+    cleanups.add(() => cleanupRepo(root));
+
+    await runCli(root, ["spawn", "2"]);
+    const workspaces = await loadWorkspaceRecords(root);
+    expect(workspaces).toHaveLength(2);
+
+    const result = await runCli(root, ["stop", "agent-1"]);
+    expect(result.stdout).toContain("Stopped agent-1");
     expect(await tmuxSessionExists(workspaces[0]!.tmuxSession)).toBe(false);
+    expect(await tmuxSessionExists(workspaces[1]!.tmuxSession)).toBe(true);
+    expect((await loadWorkspaceRecords(root)).map((record) => record.agentId)).toEqual([
+      "agent-2"
+    ]);
+  });
+
+  test("stop --all tears down tmux sessions and runtime state", async () => {
+    const root = await createRepo({
+      userName: "Alice Example",
+      userEmail: "alice@example.com"
+    });
+    await initializeRevis(root);
+    cleanups.add(() => cleanupRepo(root));
+
+    await runCli(root, ["spawn", "1"]);
+    const [workspace] = await loadWorkspaceRecords(root);
+
+    expect(await tmuxSessionExists(workspace!.tmuxSession)).toBe(true);
+
+    const result = await runCli(root, ["stop", "--all"]);
+    expect(result.stdout).toContain("Stopped 1 workspaces");
+    expect(await tmuxSessionExists(workspace!.tmuxSession)).toBe(false);
     expect(await pathExists(`${root}/.revis/runtime`)).toBe(false);
   });
 });

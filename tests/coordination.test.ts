@@ -1,14 +1,13 @@
 import { pathExists } from "../src/core/files";
 import { daemonSocketPath } from "../src/core/ipc";
+import { runCommand } from "../src/core/process";
 import { daemonSocketReady } from "../src/coordination/daemon";
 import { loadWorkspaceRecords } from "../src/coordination/runtime";
-import { loadStatusSnapshot } from "../src/coordination/status";
 import { createWorkspaces, tmuxSessionExists } from "../src/coordination/workspaces";
 import {
   cleanupRepo,
   commitWorkspaceChange,
   createCleanupStack,
-  createRepo,
   createWorkspaceHarness,
   createSharedRemote,
   initializeRevis,
@@ -31,7 +30,11 @@ describe("workspace coordination", () => {
     });
     cleanups.add(() => cleanupRepo(root, daemon));
 
-    expect(workspaces.map((workspace) => workspace.branch)).toEqual([
+    expect(workspaces.map((workspace) => workspace.coordinationBranch)).toEqual([
+      "revis/alice/agent-1/work",
+      "revis/alice/agent-2/work"
+    ]);
+    expect(workspaces.map((workspace) => workspace.localBranch)).toEqual([
       "revis/alice/agent-1/work",
       "revis/alice/agent-2/work"
     ]);
@@ -73,6 +76,57 @@ describe("workspace coordination", () => {
     expect(records.find((record) => record.agentId === "agent-1")?.lastRelayedSha).toBe(
       sha
     );
+  });
+
+  test("keeps relaying through the stable coordination branch after a local branch switch", async () => {
+    const { daemon, root, workspaces } = await createWorkspaceHarness({
+      count: 2,
+      user: {
+        userName: "Alice Example",
+        userEmail: "alice@example.com"
+      }
+    });
+    cleanups.add(() => cleanupRepo(root, daemon));
+
+    await runCommand(["git", "checkout", "-b", "autoresearch/mar14"], {
+      cwd: workspaces[0]!.repoPath
+    });
+
+    const sha = await commitWorkspaceChange(
+      workspaces[0]!.repoPath,
+      "switched local branch"
+    );
+
+    await waitFor(async () => {
+      const records = await loadWorkspaceRecords(root);
+      return records.find((record) => record.agentId === "agent-1")?.localBranch
+        === "autoresearch/mar14";
+    });
+
+    await waitFor(async () => {
+      const records = await loadWorkspaceRecords(root);
+      return (
+        records
+          .find((record) => record.agentId === "agent-2")
+          ?.queuedSteeringMessages?.some(
+            (line) =>
+              line.includes(sha.slice(0, 8)) && line.includes("switched local branch")
+          ) ?? false
+      );
+    });
+
+    await waitFor(async () => {
+      const coordinationHead = (
+        await runCommand([
+          "git",
+          "--git-dir",
+          `${root}/.revis/coordination.git`,
+          "rev-parse",
+          "revis/alice/agent-1/work"
+        ])
+      ).stdout.trim();
+      return coordinationHead === sha;
+    });
   });
 
   test("fetches and relays remote operator branches through the shared namespace", async () => {

@@ -1,7 +1,5 @@
 /** Shared data structures for the passive Revis CLI. */
 
-export type AgentType = "codex";
-
 export type AgentState =
   | "starting"
   | "idle"
@@ -10,21 +8,18 @@ export type AgentState =
   | "stopped"
   | "failed";
 
-export interface AgentTemplate {
-  argv: string[];
-}
-
 export interface RevisConfig {
   coordinationRemote: string;
   trunkBase: string;
-  codexTemplate: AgentTemplate;
   remotePollSeconds: number;
 }
 
 export interface WorkspaceRecord {
   agentId: string;
   operatorSlug: string;
-  branch: string;
+  coordinationBranch: string;
+  localBranch: string;
+  expectedPaneCommand?: string;
   repoPath: string;
   tmuxSession: string;
   state: AgentState;
@@ -86,7 +81,6 @@ export interface PullRequestRef {
 export interface CommitNotification {
   type?: "commit" | "sync" | "shutdown";
   agentId?: string;
-  branch?: string;
   sha?: string;
   reason?: string;
 }
