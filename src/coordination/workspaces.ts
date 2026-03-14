@@ -527,12 +527,13 @@ async function queueSteeringMessage(
 
 /** Return whether the workspace pane is running something other than its login shell. */
 async function workspaceAcceptsSteeringMessages(record: WorkspaceRecord): Promise<boolean> {
-  if (!record.expectedPaneCommand) {
+  const expected = record.expectedPaneCommand ?? (await inferredPaneCommand(record));
+  if (!expected) {
     return false;
   }
 
-  const command = await workspacePaneCommand(record);
-  return command === record.expectedPaneCommand;
+  const commands = await workspaceProcessCommands(record);
+  return commands.some((command) => commandLineMatchesExpected(command, expected));
 }
 
 /** Type one steering message into the active workspace pane. */
@@ -540,14 +541,43 @@ async function deliverSteeringMessage(
   record: WorkspaceRecord,
   message: string
 ): Promise<void> {
+  const submitKey = await steeringSubmitKey(record);
+
   await runCommand([
     "tmux",
     "send-keys",
     "-t",
     `${record.tmuxSession}:0`,
-    message,
-    "Enter"
+    "-l",
+    message
   ]);
+
+  await runCommand([
+    "tmux",
+    "send-keys",
+    "-t",
+    `${record.tmuxSession}:0`,
+    submitKey
+  ]);
+}
+
+/** Choose how Revis should submit one relay into the active pane. */
+async function steeringSubmitKey(record: WorkspaceRecord): Promise<"Enter" | "Tab"> {
+  const agent = relayAgentAdapter(record);
+  if (!agent) {
+    return "Enter";
+  }
+
+  if (agent === "claude") {
+    return "Enter";
+  }
+
+  const lines = await currentPaneLines(record);
+  if (codexNeedsQueuedMessage(lines)) {
+    return "Tab";
+  }
+
+  return "Enter";
 }
 
 /** Start one operator command in a fresh pane that returns to a login shell on exit. */
@@ -592,6 +622,158 @@ function expectedPaneCommand(command: string): string | undefined {
   }
 
   return undefined;
+}
+
+/** Return the pane shell plus any descendant process command lines for one workspace. */
+async function workspaceProcessCommands(record: WorkspaceRecord): Promise<string[]> {
+  const panePid = await workspacePanePid(record);
+  const descendantPids = await collectDescendantPids(panePid);
+  const commands = [await workspacePaneCommand(record)];
+
+  for (const pid of descendantPids) {
+    commands.push(await processCommandLine(pid));
+  }
+
+  return commands;
+}
+
+/** Capture the visible pane text without mutating persisted activity snapshots. */
+async function currentPaneLines(record: WorkspaceRecord): Promise<string[]> {
+  const output = await runCommand([
+    "tmux",
+    "capture-pane",
+    "-t",
+    `${record.tmuxSession}:0`,
+    "-p"
+  ]);
+
+  return output.stdout.replaceAll("\r", "").split(/\r?\n/).filter(Boolean);
+}
+
+/** Return the known relay adapter for the current pane command, if any. */
+function relayAgentAdapter(record: WorkspaceRecord): "claude" | "codex" | undefined {
+  switch (record.expectedPaneCommand) {
+    case "claude":
+      return "claude";
+    case "codex":
+      return "codex";
+    default:
+      return undefined;
+  }
+}
+
+/** Return whether the visible Codex UI expects Tab to queue a busy-session message. */
+function codexNeedsQueuedMessage(lines: string[]): boolean {
+  return lines.some((line) => line.toLowerCase().includes("tab to queue message"));
+}
+
+/** Return the tmux pane PID for one workspace session. */
+async function workspacePanePid(record: WorkspaceRecord): Promise<number> {
+  const output = await runCommand([
+    "tmux",
+    "display-message",
+    "-p",
+    "-t",
+    `${record.tmuxSession}:0`,
+    "#{pane_pid}"
+  ]);
+  return Number(output.stdout.trim());
+}
+
+/** Collect every descendant process pid rooted under one tmux pane shell. */
+async function collectDescendantPids(parentPid: number): Promise<number[]> {
+  const seen = new Set<number>();
+  const queue = [parentPid];
+  const descendants: number[] = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const children = await childPids(current);
+
+    for (const child of children) {
+      if (seen.has(child)) {
+        continue;
+      }
+
+      seen.add(child);
+      descendants.push(child);
+      queue.push(child);
+    }
+  }
+
+  return descendants;
+}
+
+/** Return the direct child pids for one process. */
+async function childPids(parentPid: number): Promise<number[]> {
+  const result = await runCommand(["pgrep", "-P", String(parentPid)], {
+    check: false
+  });
+  if (result.exitCode === 1) {
+    return [];
+  }
+
+  if (result.exitCode !== 0) {
+    const message = result.stderr.trim() || result.stdout.trim() || "pgrep failed";
+    throw new RevisError(message);
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => Number(line));
+}
+
+/** Return one process command line from the local process table. */
+async function processCommandLine(pid: number): Promise<string> {
+  const output = await runCommand(["ps", "-o", "command=", "-p", String(pid)], {
+    check: false
+  });
+  if (output.exitCode !== 0) {
+    return "";
+  }
+
+  return output.stdout.trim();
+}
+
+/** Return whether a process command line contains the launched program token. */
+function commandLineMatchesExpected(commandLine: string, expected: string): boolean {
+  if (commandLine === expected) {
+    return true;
+  }
+
+  const tokens = commandLine.match(/(?:[^\s'"]+|'[^']*'|"[^"]*")+/g) ?? [];
+  return tokens.some((token) => basename(token.replace(/^['"]|['"]$/g, "")) === expected);
+}
+
+/** Infer the launched pane command from tmux when runtime metadata is missing it. */
+async function inferredPaneCommand(record: WorkspaceRecord): Promise<string | undefined> {
+  return expectedPaneCommand(await workspaceLaunchCommand(record));
+}
+
+/** Return the command string Revis asked tmux to run for one pane, when recognizable. */
+async function workspaceLaunchCommand(record: WorkspaceRecord): Promise<string> {
+  const output = await runCommand([
+    "tmux",
+    "display-message",
+    "-p",
+    "-t",
+    `${record.tmuxSession}:0`,
+    "#{pane_start_command}"
+  ]);
+  const startCommand = output.stdout.trim();
+  const shellIndex = startCommand.indexOf("-lc ");
+  const resumeIndex = startCommand.lastIndexOf("; exec ");
+
+  if (shellIndex < 0 || resumeIndex < 0 || resumeIndex <= shellIndex + 4) {
+    return "";
+  }
+
+  return startCommand
+    .slice(shellIndex + 4, resumeIndex)
+    .trim()
+    .replace(/^['"]|['"]$/g, "");
 }
 
 /** Stop one workspace tmux session without hiding real tmux failures. */

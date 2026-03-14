@@ -70,15 +70,16 @@ It also writes `.revis/config.json` with:
 
 `revis spawn N` creates `N` local clones under `.revis/workspaces/agent-N/repo`, creates a tmux session per workspace, installs a `post-commit` hook, writes workspace runtime metadata, and ensures the daemon is running.
 
-`revis spawn N --exec '<command>'` does the same setup and then types that command into each workspace tmux pane.
+`revis spawn N --exec '<command>'` does the same setup and starts that command inside each workspace tmux pane.
 
 `revis stop <agent-id>` stops one workspace. `revis stop --all` tears down every workspace plus the daemon.
 
 The daemon listens on a Unix domain socket on Unix-like systems and on a named pipe on Windows. Every workspace `post-commit` hook notifies the daemon immediately with the workspace id and new commit SHA. The daemon then:
 
-- pushes each workspace's current `HEAD` to its owned `revis/<operator>/agent-*/work` coordination ref
+- baselines current workspace heads and visible remote refs when it starts, so old history is not replayed
+- pushes each workspace's new `HEAD` commits to its owned `revis/<operator>/agent-*/work` coordination ref
 - fetches remote `revis/*/agent-*/work` refs
-- relays unseen commit summaries into your local tmux sessions
+- relays newly seen commit summaries into your local tmux sessions
 - rebases owned workspaces onto the current sync target when trunk advances
 
 For local `revis-local` coordination, the sync target is `revis/trunk`. For a real shared remote, the sync target is the configured base branch.
@@ -141,20 +142,20 @@ These files are local operator state. `revis init` adds the local runtime paths 
 
 ## Status And Monitor
 
-`revis status` prints:
+`revis status` prints a compact table with:
 
-- daemon health and socket path
-- operator slug, remote, and sync base
-- one line per workspace with coordination ref, local branch, state, recent SHAs, queued steering count, attach command, and latest activity
+- workspace name
+- current `[idle]` or `[active]` state
+- the `tmux attach ...` command
 
 `revis monitor` opens an Ink TUI with:
 
-- daemon and repo summary
-- workspace list
-- activity for the selected workspace
-- recent runtime events
+- a workspace sidebar
+- a detail pane for the selected workspace
+- switchable activity and events views
+- direct attach and refresh keybindings
 
-Use `Enter` or `a` to attach to a workspace tmux session, `j`/`k` to move, and `q` to quit.
+Use `Enter` or `a` to attach to a workspace tmux session, `j`/`k` to move, `Tab` or `1`/`2` to switch panes, `r` to refresh, and `q` to quit.
 
 ## Development
 

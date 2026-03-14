@@ -1,18 +1,17 @@
-/** Ink monitor for daemon and workspace state. */
+/** Ink monitor for live daemon and workspace state. */
 
 import React, { useEffect, useState } from "react";
-import { Box, Newline, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import type { WorkspaceRecord } from "../core/models";
 import type { StatusSnapshot } from "../coordination/status";
 import { loadStatusSnapshot } from "../coordination/status";
-import {
-  formatDaemonHealth,
-  formatStatusContext,
-  formatWorkspaceSummary
-} from "./status-presenter";
 
 const REFRESH_INTERVAL_MS = 1000;
+const SIDEBAR_MIN_WIDTH = 28;
+const SIDEBAR_MAX_WIDTH = 38;
+
+type MonitorTab = "activity" | "events";
 
 type MonitorExit =
   | {
@@ -31,8 +30,11 @@ export interface MonitorProps {
 /** Render the live monitor and own its refresh and keyboard loop. */
 export function MonitorApp({ root, onExit }: MonitorProps): React.JSX.Element {
   const { exit } = useApp();
-  const snapshot = useMonitorSnapshot(root);
+  const { stdout } = useStdout();
+  const [refreshTick, setRefreshTick] = useState(0);
+  const snapshot = useMonitorSnapshot(root, refreshTick);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [tab, setTab] = useState<MonitorTab>("activity");
 
   useInput((input, key) => {
     handleMonitorInput({
@@ -40,40 +42,55 @@ export function MonitorApp({ root, onExit }: MonitorProps): React.JSX.Element {
       input,
       key,
       onExit,
+      refresh: () => {
+        setRefreshTick((current) => current + 1);
+      },
       selectedIndex,
       setSelectedIndex,
-      snapshot
+      setTab,
+      snapshot,
+      tab
     });
   });
 
   if (!snapshot) {
-    return <Text>Loading Revis monitor…</Text>;
+    return <Text>Loading Revis monitor...</Text>;
   }
 
+  const width = Math.max(stdout.columns ?? 100, 80);
+  const sidebarWidth = clamp(Math.floor(width * 0.3), SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+
   return (
-    <Box flexDirection="column">
-      <Text>
-        Revis monitor | {formatDaemonHealth(snapshot)} | {formatStatusContext(snapshot)}
-      </Text>
-      <Text>Enter/a attach • j/k move • q quit</Text>
-      <Newline />
-      <WorkspaceList selectedIndex={selectedIndex} snapshot={snapshot} />
-      <Newline />
-      <ActivityPanel selectedIndex={selectedIndex} snapshot={snapshot} />
-      <Newline />
-      <EventsPanel snapshot={snapshot} />
+    <Box flexDirection="column" paddingX={1}>
+      <Header snapshot={snapshot} />
+      <Box marginTop={1} flexDirection="row" columnGap={1}>
+        <WorkspacePanel
+          selectedIndex={selectedIndex}
+          snapshot={snapshot}
+          width={sidebarWidth}
+        />
+        <InspectorPanel
+          selectedIndex={selectedIndex}
+          snapshot={snapshot}
+          tab={tab}
+          width={Math.max(width - sidebarWidth - 4, 40)}
+        />
+      </Box>
+      <Footer tab={tab} />
     </Box>
   );
 }
 
 /** Poll the runtime snapshot that backs the monitor UI. */
-function useMonitorSnapshot(root: string): StatusSnapshot | null {
+function useMonitorSnapshot(
+  root: string,
+  refreshTick: number
+): StatusSnapshot | null {
   const [snapshot, setSnapshot] = useState<StatusSnapshot | null>(null);
 
   useEffect(() => {
     let active = true;
 
-    // Load once immediately, then keep refreshing while the UI is mounted.
     const refresh = async (): Promise<void> => {
       const next = await loadStatusSnapshot(root, {
         refresh: true
@@ -84,6 +101,7 @@ function useMonitorSnapshot(root: string): StatusSnapshot | null {
     };
 
     void refresh();
+
     const timer = setInterval(() => {
       void refresh();
     }, REFRESH_INTERVAL_MS);
@@ -92,24 +110,77 @@ function useMonitorSnapshot(root: string): StatusSnapshot | null {
       active = false;
       clearInterval(timer);
     };
-  }, [root]);
+  }, [refreshTick, root]);
 
   return snapshot;
 }
 
-/** Handle keyboard input for quitting, selection, and tmux attach. */
+/** Handle keyboard input for navigation, refresh, attach, and quit. */
 function handleMonitorInput(options: {
   exit: () => void;
   input: string;
-  key: { downArrow: boolean; escape: boolean; return: boolean; upArrow: boolean };
+  key: {
+    downArrow?: boolean;
+    escape?: boolean;
+    leftArrow?: boolean;
+    return?: boolean;
+    rightArrow?: boolean;
+    tab?: boolean;
+    upArrow?: boolean;
+  };
   onExit: (exit: MonitorExit) => void;
+  refresh: () => void;
   selectedIndex: number;
   setSelectedIndex: React.Dispatch<React.SetStateAction<number>>;
+  setTab: React.Dispatch<React.SetStateAction<MonitorTab>>;
   snapshot: StatusSnapshot | null;
+  tab: MonitorTab;
 }): void {
-  const { exit, input, key, onExit, selectedIndex, setSelectedIndex, snapshot } = options;
+  const {
+    exit,
+    input,
+    key,
+    onExit,
+    refresh,
+    selectedIndex,
+    setSelectedIndex,
+    setTab,
+    snapshot,
+    tab
+  } = options;
+
   if (shouldQuit(input, key)) {
     quitMonitor(onExit, exit);
+    return;
+  }
+
+  if (input === "r") {
+    refresh();
+    return;
+  }
+
+  if (input === "\t" || key.tab) {
+    setTab((current) => (current === "activity" ? "events" : "activity"));
+    return;
+  }
+
+  if (input === "h" || key.leftArrow) {
+    setTab("activity");
+    return;
+  }
+
+  if (input === "l" || key.rightArrow) {
+    setTab("events");
+    return;
+  }
+
+  if (input === "1") {
+    setTab("activity");
+    return;
+  }
+
+  if (input === "2") {
+    setTab("events");
     return;
   }
 
@@ -139,96 +210,250 @@ function handleMonitorInput(options: {
   exit();
 }
 
-/** Render the workspace list inside the monitor body. */
-function WorkspaceList({
-  selectedIndex,
-  snapshot
-}: {
+/** Render the monitor header with the current daemon and repo context. */
+function Header({ snapshot }: { snapshot: StatusSnapshot }): React.JSX.Element {
+  const workspacesLabel =
+    snapshot.workspaces.length === 1 ? "1 workspace" : `${snapshot.workspaces.length} workspaces`;
+
+  return (
+    <Box
+      borderStyle="round"
+      borderColor="cyan"
+      paddingX={1}
+      paddingY={0}
+      flexDirection="column"
+    >
+      <Box justifyContent="space-between">
+        <Text bold>Revis Monitor</Text>
+        <Text color={snapshot.daemonHealthy ? "green" : "red"}>
+          {snapshot.daemonHealthy ? "daemon up" : "daemon down"}
+        </Text>
+      </Box>
+      <Text wrap="truncate-end">
+        {snapshot.operatorSlug} on {snapshot.config.coordinationRemote}/{snapshot.syncBranch} •{" "}
+        {workspacesLabel}
+      </Text>
+    </Box>
+  );
+}
+
+/** Render the workspace selector sidebar. */
+function WorkspacePanel(options: {
   selectedIndex: number;
   snapshot: StatusSnapshot;
+  width: number;
 }): React.JSX.Element {
+  const { selectedIndex, snapshot, width } = options;
+
   return (
-    <>
-      <Text>Workspaces</Text>
+    <Box
+      borderStyle="round"
+      borderColor="gray"
+      paddingX={1}
+      flexDirection="column"
+      width={width}
+    >
+      <SectionTitle title="Workspaces" />
       {snapshot.workspaces.length === 0 ? (
-        <Text color="yellow">No workspaces created yet.</Text>
+        <Text color="yellow">No workspaces yet.</Text>
       ) : (
         snapshot.workspaces.map((workspace, index) => (
           <WorkspaceRow
             key={workspace.agentId}
             isSelected={index === selectedIndex}
             workspace={workspace}
+            width={width - 4}
           />
         ))
       )}
-    </>
+    </Box>
   );
 }
 
-/** Render activity for the currently highlighted workspace. */
-function ActivityPanel({
-  selectedIndex,
-  snapshot
-}: {
+/** Render the detail area for the selected workspace. */
+function InspectorPanel(options: {
   selectedIndex: number;
   snapshot: StatusSnapshot;
+  tab: MonitorTab;
+  width: number;
 }): React.JSX.Element {
-  const selected = selectedWorkspace(snapshot, selectedIndex);
+  const { selectedIndex, snapshot, tab, width } = options;
+  const selected = snapshot.workspaces[selectedIndex] ?? null;
+  const events = snapshot.events.slice(-10).reverse();
+
   if (!selected) {
     return (
-      <>
-        <Text>Activity</Text>
-        <Text color="gray">Select a workspace to inspect activity.</Text>
-      </>
+      <Box
+        borderStyle="round"
+        borderColor="gray"
+        paddingX={1}
+        flexDirection="column"
+        flexGrow={1}
+        width={width}
+      >
+        <SectionTitle title="Details" />
+        <Text color="gray">Create a workspace to inspect live activity.</Text>
+      </Box>
     );
   }
 
   return (
-    <>
-      <Text>Activity ({selected.agentId})</Text>
-      {snapshot.activity[selected.agentId]!.slice(-12).map((line, index) => (
-        <Text key={`${selected.agentId}-${index}`}>{line}</Text>
-      ))}
-    </>
+    <Box
+      borderStyle="round"
+      borderColor="gray"
+      paddingX={1}
+      flexDirection="column"
+      flexGrow={1}
+      width={width}
+    >
+      <WorkspaceInspectorHeader workspace={selected} width={width - 4} />
+      <TabBar tab={tab} />
+      {tab === "activity" ? (
+        <ActivityFeed
+          lines={snapshot.activity[selected.agentId] ?? []}
+          width={width - 4}
+        />
+      ) : (
+        <EventFeed events={events} width={width - 4} />
+      )}
+    </Box>
   );
 }
 
-/** Render recent daemon and workspace events. */
-function EventsPanel({ snapshot }: { snapshot: StatusSnapshot }): React.JSX.Element {
+/** Render one selected-workspace header card. */
+function WorkspaceInspectorHeader(options: {
+  workspace: WorkspaceRecord;
+  width: number;
+}): React.JSX.Element {
+  const { workspace, width } = options;
+
   return (
-    <>
-      <Text>Events</Text>
-      {snapshot.events.slice(-8).map((event, index) => (
-        <Text key={`${event.timestamp}-${index}`}>
-          {event.timestamp} {event.summary}
+    <Box flexDirection="column" marginBottom={1}>
+      <Box justifyContent="space-between">
+        <Text bold>{workspace.agentId}</Text>
+        <Text color={stateColor(workspace.state)}>[{workspace.state}]</Text>
+      </Box>
+      <Text wrap="truncate-end">{truncateEnd(workspace.attachCmd.join(" "), width)}</Text>
+      <Text color="gray" wrap="truncate-end">
+        local {truncateEnd(workspace.localBranch, width - 6)}
+      </Text>
+      <Text color="gray" wrap="truncate-end">
+        coord {truncateEnd(workspace.coordinationBranch, width - 6)}
+      </Text>
+    </Box>
+  );
+}
+
+/** Render the activity/events tab selector. */
+function TabBar({ tab }: { tab: MonitorTab }): React.JSX.Element {
+  return (
+    <Box marginBottom={1}>
+      <Text color={tab === "activity" ? "cyan" : "gray"} bold={tab === "activity"}>
+        [1] Activity
+      </Text>
+      <Text>  </Text>
+      <Text color={tab === "events" ? "cyan" : "gray"} bold={tab === "events"}>
+        [2] Events
+      </Text>
+    </Box>
+  );
+}
+
+/** Render the latest pane output for the selected workspace. */
+function ActivityFeed(options: {
+  lines: string[];
+  width: number;
+}): React.JSX.Element {
+  const { lines, width } = options;
+  const visible = lines.slice(-14);
+
+  if (visible.length === 0) {
+    return <Text color="gray">No captured output yet.</Text>;
+  }
+
+  return (
+    <Box flexDirection="column">
+      {visible.map((line, index) => (
+        <Text key={`activity-${index}`} wrap="truncate-end">
+          {truncateEnd(line, width)}
         </Text>
       ))}
-    </>
+    </Box>
   );
 }
 
-/** Render one compact workspace row inside the monitor list. */
-function WorkspaceRow({
-  isSelected,
-  workspace
-}: {
+/** Render the recent daemon event feed. */
+function EventFeed(options: {
+  events: StatusSnapshot["events"];
+  width: number;
+}): React.JSX.Element {
+  const { events, width } = options;
+
+  if (events.length === 0) {
+    return <Text color="gray">No events yet.</Text>;
+  }
+
+  return (
+    <Box flexDirection="column">
+      {events.map((event, index) => (
+        <Text key={`${event.timestamp}-${index}`} wrap="truncate-end">
+          {truncateEnd(`${shortTimestamp(event.timestamp)}  ${event.summary}`, width)}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+/** Render one workspace row inside the sidebar list. */
+function WorkspaceRow(options: {
   isSelected: boolean;
   workspace: WorkspaceRecord;
+  width: number;
 }): React.JSX.Element {
-  const label = formatWorkspaceSummary(workspace);
+  const { isSelected, workspace, width } = options;
+  const badge = workspace.state.toUpperCase();
+  const label = truncateEnd(`${workspace.agentId}  ${badge}`, width - 2);
+
   return (
-    <Text {...(isSelected ? { color: "cyan" as const } : {})}>
+    <Text
+      color={isSelected ? "cyan" : stateColor(workspace.state)}
+      bold={isSelected}
+      wrap="truncate-end"
+    >
       {isSelected ? ">" : " "} {label}
     </Text>
+  );
+}
+
+/** Render the persistent monitor keybinding hint row. */
+function Footer({ tab }: { tab: MonitorTab }): React.JSX.Element {
+  const tabHint = tab === "activity" ? "activity selected" : "events selected";
+
+  return (
+    <Box marginTop={1}>
+      <Text color="gray">
+        j/k move  •  enter attach  •  tab or 1/2 switch panes ({tabHint})  •  r refresh  •
+        {" "}q quit
+      </Text>
+    </Box>
+  );
+}
+
+/** Render one small section title. */
+function SectionTitle({ title }: { title: string }): React.JSX.Element {
+  return (
+    <Box marginBottom={1}>
+      <Text bold>{title}</Text>
+    </Box>
   );
 }
 
 /** Return whether the current keypress should close the monitor. */
 function shouldQuit(
   input: string,
-  key: { escape: boolean }
+  key: { escape?: boolean }
 ): boolean {
-  return input === "q" || key.escape;
+  return input === "q" || Boolean(key.escape);
 }
 
 /** Move the highlighted workspace selection by one step. */
@@ -236,12 +461,38 @@ function moveSelection(current: number, delta: number, size: number): number {
   return Math.max(0, Math.min(current + delta, size - 1));
 }
 
-/** Return the currently highlighted workspace, if one exists. */
-function selectedWorkspace(
-  snapshot: StatusSnapshot,
-  selectedIndex: number
-): WorkspaceRecord | null {
-  return snapshot.workspaces[selectedIndex] ?? null;
+/** Return the display color for a workspace state. */
+function stateColor(state: WorkspaceRecord["state"]): string {
+  switch (state) {
+    case "active":
+      return "green";
+    case "failed":
+      return "red";
+    case "stopping":
+    case "starting":
+      return "yellow";
+    default:
+      return "gray";
+  }
+}
+
+/** Clamp one numeric value into the provided range. */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(value, max));
+}
+
+/** Keep one monitor line inside its available terminal width. */
+function truncateEnd(value: string, width: number): string {
+  if (width <= 1 || value.length <= width) {
+    return value;
+  }
+
+  return `${value.slice(0, width - 1)}…`;
+}
+
+/** Format one ISO timestamp for compact monitor display. */
+function shortTimestamp(timestamp: string): string {
+  return timestamp.slice(11, 19);
 }
 
 export type { MonitorExit };

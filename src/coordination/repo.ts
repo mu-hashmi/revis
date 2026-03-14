@@ -118,7 +118,7 @@ export async function ensureCoordinationRemote(root: string): Promise<string> {
   const target = join(root, ".revis", "coordination.git");
   if (!(await pathExists(target))) {
     await ensureDir(join(root, ".revis"));
-    await simpleGit().raw(["init", "--bare", target]);
+    await runCommand(["git", "init", "--bare", target], { cwd: root });
   }
 
   return target;
@@ -239,6 +239,24 @@ export async function workingTreeDirty(repoPath: string): Promise<boolean> {
 /** Return the current commit SHA for the checked-out branch. */
 export async function currentHeadSha(repoPath: string): Promise<string> {
   return (await gitClient(repoPath).revparse(["HEAD"])).trim();
+}
+
+/** Return the current HEAD commit subject for one repository checkout. */
+export async function currentHeadSubject(repoPath: string): Promise<string> {
+  return (await gitClient(repoPath).raw(["log", "-1", "--pretty=%s", "HEAD"])).trim();
+}
+
+/** Return how many commits HEAD is ahead of one base ref. */
+export async function commitCountSinceRef(
+  repoPath: string,
+  baseRef: string
+): Promise<number> {
+  const output = await gitClient(repoPath).raw([
+    "rev-list",
+    "--count",
+    `${baseRef}..HEAD`
+  ]);
+  return Number.parseInt(output.trim(), 10);
 }
 
 /** Return a git-identity-derived operator slug. */

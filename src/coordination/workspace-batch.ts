@@ -21,13 +21,16 @@ export async function prepareWorkspaceBatch(
 ): Promise<WorkspaceRecord[]> {
   await ensureTmuxReady();
 
+  // Bring the daemon fully online before any fresh workspace starts running user code.
+  // Otherwise the daemon's own startup sync can overlap the first agent-side git commands.
+  await ensureDaemonRunning(root);
+
   const created = await createWorkspaces(
     root,
     config,
     options.count,
     daemonSocketPath(root)
   );
-  await ensureDaemonRunning(root);
 
   if (options.execCommand) {
     await runCommandInWorkspaces(root, created, options.execCommand);
@@ -65,8 +68,8 @@ export async function stopWorkspace(root: string, agentId: string): Promise<void
 /** Tear down every workspace plus the daemon for one initialized repository. */
 export async function stopWorkspaceBatch(root: string): Promise<number> {
   const workspaces = await loadWorkspaceRecords(root);
-  await stopWorkspaces(root, workspaces);
   await stopDaemon(root);
+  await stopWorkspaces(root, workspaces);
   await clearRuntime(root);
   return workspaces.length;
 }

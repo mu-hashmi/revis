@@ -57,6 +57,7 @@ Current important modules:
 - Workspace `post-commit` hooks notify the daemon over local IPC.
 - `revis spawn` is the only public command that creates workspaces; `--exec` is optional and agent-agnostic.
 - The daemon is event-driven for local commits and poll-driven for remote discovery.
+- The daemon baselines current local and remote heads on startup; only newer commits should be pushed or relayed.
 - Promotion is operator-only.
 - Agents do not run `revis` commands inside their sessions.
 

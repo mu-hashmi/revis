@@ -18,11 +18,7 @@ import {
   stopWorkspace,
   stopWorkspaceBatch
 } from "../coordination/workspace-batch";
-import {
-  formatDaemonHealth,
-  formatStatusContext,
-  formatWorkspaceSummary
-} from "./status-presenter";
+import { formatStatusTable } from "./status-presenter";
 import { runMonitor } from "./monitor-session";
 
 export interface CliWriters {
@@ -78,18 +74,13 @@ export function buildCli(io: CliWriters = {}): Command {
       refresh: true
     });
 
-    writeOut(`${formatDaemonHealth(snapshot)}\n`);
-    writeOut(`${formatStatusContext(snapshot)}\n`);
-
     if (snapshot.workspaces.length === 0) {
       writeOut("no workspaces\n");
       return;
     }
 
-    for (const workspace of snapshot.workspaces) {
-      const activity = snapshot.activity[workspace.agentId]!;
-      const activityLine = activity.at(-1) ?? "";
-      writeOut(`${formatStatusWorkspaceLine(workspace, activityLine)}\n`);
+    for (const line of formatStatusTable(snapshot.workspaces)) {
+      writeOut(`${line}\n`);
     }
   });
 
@@ -194,6 +185,12 @@ async function runBatchCommand(
   for (const workspace of created) {
     writeOut(`${formatBatchResult(workspace, execCommand)}\n`);
   }
+
+  if (execCommand) {
+    writeOut(
+      "NOTE: the launched agent may still need confirmation before it begins working. Run `revis status` to confirm.\n"
+    );
+  }
 }
 
 /** Read the package version from the repository root. */
@@ -201,19 +198,6 @@ async function packageVersion(): Promise<string> {
   const path = new URL("../../package.json", import.meta.url);
   const payload = JSON.parse(await readFile(path, "utf8")) as { version: string };
   return payload.version;
-}
-
-/** Format one CLI status line for a workspace plus its operator-only extras. */
-function formatStatusWorkspaceLine(
-  workspace: WorkspaceRecord,
-  activityLine: string
-): string {
-  const extras = [`attach=${workspace.attachCmd.join(" ")}`];
-  if (activityLine) {
-    extras.push(`activity=${activityLine}`);
-  }
-
-  return `${formatWorkspaceSummary(workspace)} | ${extras.join(" | ")}`;
 }
 
 /** Format one workspace line for the `spawn` command. */

@@ -36,6 +36,12 @@ export interface WorkspaceRecord {
   lastError?: string;
 }
 
+export interface StatusWorkspaceRecord extends WorkspaceRecord {
+  commitCount: number;
+  lastCommitSubject: string;
+  lastCommitShortSha: string;
+}
+
 export interface DaemonRecord {
   pid: number;
   socketPath: string;

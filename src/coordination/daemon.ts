@@ -19,12 +19,14 @@ import { daemonSocketPath, removeSocketPath } from "../core/ipc";
 import {
   currentRevisCommand,
   runCommand,
+  sleep,
   spawnReadyProcess
 } from "../core/process";
 import { isoNow } from "../core/time";
 import {
   appendEvent,
   deleteDaemonRecord,
+  ensureRuntime,
   loadDaemonRecord,
   loadRelayRegistry,
   loadWorkspaceRecords,
@@ -34,6 +36,7 @@ import {
 } from "./runtime";
 import {
   commitSummaryForRef,
+  currentBranch,
   currentHeadSha,
   deriveOperatorSlug,
   fetchCoordinationRefs,
@@ -54,6 +57,8 @@ import {
 const START_TIMEOUT_MS = 10_000;
 const SOCKET_CONNECT_TIMEOUT_MS = 400;
 const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
+const SOCKET_SHUTDOWN_REQUEST_TIMEOUT_MS = 1_000;
+const PROCESS_STOP_TIMEOUT_MS = 1_000;
 const DAEMON_READY_LINE = "REVIS_DAEMON_READY";
 const EXPECTED_SOCKET_CONNECT_ERRORS = new Set([
   "ECONNREFUSED",
@@ -153,7 +158,8 @@ export async function ensureDaemonRunning(root: string): Promise<DaemonRecord> {
 /** Send one request to the daemon and wait for its socket response. */
 async function sendDaemonRequest(
   socketPath: string,
-  notification: CommitNotification
+  notification: CommitNotification,
+  timeoutMs = SOCKET_REQUEST_TIMEOUT_MS
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let settled = false;
@@ -171,7 +177,7 @@ async function sendDaemonRequest(
       fn();
     };
 
-    socket.setTimeout(SOCKET_REQUEST_TIMEOUT_MS, () => {
+    socket.setTimeout(timeoutMs, () => {
       socket.destroy();
       settle(() =>
         reject(new RevisError(`Timed out writing to daemon socket ${socketPath}`))
@@ -215,17 +221,36 @@ export async function stopDaemon(root: string): Promise<void> {
   }
 
   if (await daemonSocketReady(record.socketPath)) {
-    await sendDaemonRequest(record.socketPath, {
-      type: "shutdown",
-      reason: "stop"
-    });
+    try {
+      await sendDaemonRequest(
+        record.socketPath,
+        {
+          type: "shutdown",
+          reason: "stop"
+        },
+        SOCKET_SHUTDOWN_REQUEST_TIMEOUT_MS
+      );
+      await waitForDaemonShutdown(record);
+      await removeSocketPath(record.socketPath);
+      await deleteDaemonRecord(root);
+      return;
+    } catch {
+      if (!daemonProcessAlive(record)) {
+        await removeSocketPath(record.socketPath);
+        await deleteDaemonRecord(root);
+        return;
+      }
+
+      await terminateDaemonProcess(record.pid);
+    }
+
+    await removeSocketPath(record.socketPath);
+    await deleteDaemonRecord(root);
     return;
   }
 
   if (daemonProcessAlive(record)) {
-    throw new RevisError(
-      `Revis daemon process ${record.pid} is alive but socket ${record.socketPath} is unavailable`
-    );
+    await terminateDaemonProcess(record.pid);
   }
 
   await removeSocketPath(record.socketPath);
@@ -262,6 +287,8 @@ export class RevisDaemon {
 
   /** Start serving hook notifications and periodic fetch cycles. */
   async start(): Promise<void> {
+    await ensureRuntime(this.root);
+
     // Bind the local IPC endpoint before any workspace hooks can talk to us.
     await this.prepareSocket();
 
@@ -298,9 +325,8 @@ export class RevisDaemon {
       type: "daemon_started",
       summary: `Daemon listening on ${this.socketPath}`
     });
-    if (process.env.REVIS_DAEMON_READY_STDOUT === "1") {
-      process.stdout.write(`${DAEMON_READY_LINE}\n`);
-    }
+
+    await this.baselineStartupState();
 
     // Start the periodic fetch loop and immediately process startup recovery.
     this.interval = setInterval(() => {
@@ -317,6 +343,10 @@ export class RevisDaemon {
     });
     this.queueSync();
     await this.waitForIdle();
+
+    if (process.env.REVIS_DAEMON_READY_STDOUT === "1") {
+      process.stdout.write(`${DAEMON_READY_LINE}\n`);
+    }
   }
 
   /** Stop accepting events and clean up the socket path. */
@@ -478,6 +508,37 @@ export class RevisDaemon {
     );
   }
 
+  /** Snapshot the current local and remote heads so startup ignores older history. */
+  private async baselineStartupState(): Promise<void> {
+    const workspaces = await loadWorkspaceRecords(this.root);
+
+    for (const record of workspaces) {
+      await this.baselineWorkspaceRecord(record);
+    }
+
+    await fetchCoordinationRefs(
+      this.root,
+      this.config.coordinationRemote,
+      this.syncBranch
+    );
+
+    const daemonRecord = await this.requireDaemonRecord();
+    daemonRecord.lastSyncTargetSha = (
+      await gitClient(this.root).revparse([
+        remoteTrackingRef(this.config.coordinationRemote, this.syncBranch)
+      ])
+    ).trim();
+    await writeDaemonRecord(this.root, daemonRecord);
+
+    await writeRelayRegistry(this.root, {
+      byBranch: Object.fromEntries(
+        (await listRemoteWorkspaceHeads(this.root, this.config.coordinationRemote)).map(
+          (head) => [head.branch, head.sha]
+        )
+      )
+    });
+  }
+
   /** Load the data needed for one daemon sync cycle. */
   private async loadCycleState(): Promise<{
     daemonRecord: DaemonRecord;
@@ -534,11 +595,7 @@ export class RevisDaemon {
     workspaces: WorkspaceRecord[];
   }): Promise<void> {
     const registry = await loadRelayRegistry(this.root);
-    const seededRegistry = await this.seedRegistryFromLocalState(
-      registry,
-      cycle.workspaces
-    );
-    await this.relayNewHeads(cycle.workspaces, seededRegistry, cycle.operatorSlug);
+    await this.relayNewHeads(cycle.workspaces, registry, cycle.operatorSlug);
   }
 
   /** Persist daemon success markers once one sync cycle completes. */
@@ -606,6 +663,14 @@ export class RevisDaemon {
       }
 
       await assertWorkspaceRepoExists(record);
+      const headSha = await currentHeadSha(record.repoPath);
+      record.lastCommitSha = headSha;
+
+      if (record.lastPushedSha === headSha) {
+        await writeWorkspaceRecord(this.root, record);
+        continue;
+      }
+
       const pushedSha = await pushBranch(
         record.repoPath,
         this.config.coordinationRemote,
@@ -624,32 +689,6 @@ export class RevisDaemon {
         summary: `Pushed ${record.coordinationBranch} at ${pushedSha.slice(0, 8)}`
       });
     }
-  }
-
-  /** Seed relay dedupe state from the last relayed SHA stored in each workspace. */
-  private async seedRegistryFromLocalState(
-    registry: RelayRegistry,
-    workspaces: WorkspaceRecord[]
-  ): Promise<RelayRegistry> {
-    const seeded: RelayRegistry = {
-      byBranch: { ...registry.byBranch }
-    };
-
-    for (const record of workspaces) {
-      if (seeded.byBranch[record.coordinationBranch]) {
-        continue;
-      }
-
-      if (!(await pathExists(record.repoPath))) {
-        continue;
-      }
-
-      seeded.byBranch[record.coordinationBranch] = await readLastRelayedSha(
-        record.repoPath
-      );
-    }
-
-    return seeded;
   }
 
   /** Relay unseen remote heads into local workspace sessions. */
@@ -845,6 +884,27 @@ export class RevisDaemon {
       await writeLastRelayedSha(record.repoPath, head.sha);
     }
   }
+
+  /** Capture the current workspace state as the daemon's startup baseline. */
+  private async baselineWorkspaceRecord(record: WorkspaceRecord): Promise<void> {
+    if (!(await pathExists(record.repoPath))) {
+      return;
+    }
+
+    const headSha = await currentHeadSha(record.repoPath);
+
+    record.localBranch = await currentBranch(record.repoPath);
+    record.lastCommitSha = headSha;
+    record.lastPushedSha = headSha;
+    record.lastRelayedSha = headSha;
+    record.lastSeenRemoteSha = headSha;
+    delete record.rebaseRequiredSha;
+    delete record.queuedSteeringMessages;
+    delete record.lastError;
+
+    await writeWorkspaceRecord(this.root, record);
+    await writeLastRelayedSha(record.repoPath, headSha);
+  }
 }
 
 /** Start the background daemon in the current process. */
@@ -922,4 +982,81 @@ async function abortRebase(repoPath: string): Promise<string | null> {
   }
 
   return commandFailureMessage(abort, "git rebase --abort failed");
+}
+
+/** Terminate one daemon process when graceful shutdown is unavailable. */
+async function terminateDaemonProcess(pid: number): Promise<void> {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH") {
+      throw error;
+    }
+    return;
+  }
+
+  const termStartedAt = Date.now();
+  while (Date.now() - termStartedAt < PROCESS_STOP_TIMEOUT_MS) {
+    if (!processAlive(pid)) {
+      return;
+    }
+
+    await sleep(50);
+  }
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH") {
+      throw error;
+    }
+    return;
+  }
+
+  const killStartedAt = Date.now();
+  while (Date.now() - killStartedAt < PROCESS_STOP_TIMEOUT_MS) {
+    if (!processAlive(pid)) {
+      return;
+    }
+
+    await sleep(50);
+  }
+}
+
+/** Wait briefly for one daemon process to release its socket and exit. */
+async function waitForDaemonShutdown(record: DaemonRecord): Promise<void> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < PROCESS_STOP_TIMEOUT_MS) {
+    const socketReady = await daemonSocketReady(record.socketPath);
+    if (!socketReady && !daemonProcessAlive(record)) {
+      return;
+    }
+
+    await sleep(50);
+  }
+
+  if (daemonProcessAlive(record)) {
+    await terminateDaemonProcess(record.pid);
+  }
+}
+
+/** Return whether one process id still exists. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    if (code === "EPERM") {
+      return true;
+    }
+
+    throw error;
+  }
 }

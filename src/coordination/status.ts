@@ -4,12 +4,19 @@ import type {
   DaemonRecord,
   RevisConfig,
   RuntimeEvent,
+  StatusWorkspaceRecord,
   WorkspaceRecord
 } from "../core/models";
 import { loadConfig } from "../core/config";
 import { daemonSocketPath } from "../core/ipc";
 import { daemonProcessAlive, daemonSocketReady } from "./daemon";
-import { deriveOperatorSlug, syncTargetBranch } from "./repo";
+import {
+  commitCountSinceRef,
+  currentHeadSubject,
+  deriveOperatorSlug,
+  remoteTrackingRef,
+  syncTargetBranch
+} from "./repo";
 import {
   loadActivity,
   loadDaemonRecord,
@@ -25,7 +32,7 @@ export interface StatusSnapshot {
   syncBranch: string;
   daemon: DaemonRecord | null;
   daemonHealthy: boolean;
-  workspaces: WorkspaceRecord[];
+  workspaces: StatusWorkspaceRecord[];
   events: RuntimeEvent[];
   activity: Record<string, string[]>;
 }
@@ -47,7 +54,12 @@ export async function loadStatusSnapshot(
     await refreshWorkspaceSnapshots(root, workspaces);
   }
 
-  const activity = await loadActivityMap(root, workspaces);
+  const statusWorkspaces = await loadWorkspaceStatus(
+    workspaces,
+    config.coordinationRemote,
+    syncBranch
+  );
+  const activity = await loadActivityMap(root, statusWorkspaces);
   const daemonHealthy = await loadDaemonHealth(root, daemon);
 
   return {
@@ -57,7 +69,7 @@ export async function loadStatusSnapshot(
     syncBranch,
     daemon,
     daemonHealthy,
-    workspaces,
+    workspaces: statusWorkspaces,
     events: await loadEvents(root, eventLimit),
     activity
   };
@@ -75,6 +87,24 @@ async function loadActivityMap(
   }
 
   return activity;
+}
+
+/** Add commit-progress details used by the CLI status table. */
+async function loadWorkspaceStatus(
+  workspaces: WorkspaceRecord[],
+  remoteName: string,
+  syncBranch: string
+): Promise<StatusWorkspaceRecord[]> {
+  const baseRef = remoteTrackingRef(remoteName, syncBranch);
+
+  return Promise.all(
+    workspaces.map(async (workspace) => ({
+      ...workspace,
+      commitCount: await commitCountSinceRef(workspace.repoPath, baseRef),
+      lastCommitSubject: await currentHeadSubject(workspace.repoPath),
+      lastCommitShortSha: workspace.lastCommitSha!.slice(0, 8)
+    }))
+  );
 }
 
 /** Return whether the daemon record and socket together indicate a healthy daemon. */
