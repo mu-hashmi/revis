@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Passive distributed workspace coordination for coding agents",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mu-hashmi/revis.git"
@@ -30,7 +30,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "assets",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsdown && chmod +x dist/bin/revis.js",
