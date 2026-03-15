@@ -1,4 +1,4 @@
-import { loadWorkspaceRecords } from "../src/coordination/runtime";
+import { loadEvents, loadWorkspaceRecords } from "../src/coordination/runtime";
 import { promoteWorkspace } from "../src/coordination/promotion";
 import { createWorkspaces } from "../src/coordination/workspaces";
 import { daemonSocketPath } from "../src/core/ipc";
@@ -61,12 +61,15 @@ describe("promotion flows", () => {
       );
     });
 
-    const records = await loadWorkspaceRecords(root);
-    expect(
-      records
-        .find((record) => record.agentId === "agent-2")
-        ?.queuedSteeringMessages?.some((line) => line.includes("Rebasing complete"))
-    ).toBe(true);
+    await waitFor(async () => {
+      const events = await loadEvents(root);
+      return events.some(
+        (event) =>
+          event.type === "workspace_rebased" &&
+          event.agentId === "agent-2" &&
+          event.summary.includes(trunkSha.slice(0, 8))
+      );
+    });
   });
 
   test("dirty workspaces are marked pending when trunk advances", async () => {

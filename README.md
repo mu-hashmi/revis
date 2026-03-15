@@ -1,10 +1,10 @@
-# revis — passive coordination for tmux-backed coding agent workspaces
+# revis — distributed + multiplexed autoresearch
 
 **[Install](#install)** · **[Usage](#usage)** · **[How it works](#how-it-works)** · **[Promotion](#promotion)** · **[License](#license)**
 
-*Spawn isolated local clones, relay commits over git, and keep parallel tmux sessions coordinated without turning your repo into a framework.*
+*Run parallel experiment loops across agents and machines. Commits relay to other agents in real time.*
 
-Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). This is the next step sketched in [this tweet](https://x.com/karpathy/status/2030705271627284816).
+Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). This is the [next step](https://x.com/karpathy/status/2030705271627284816).
 
 ---
 
@@ -12,14 +12,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 
 ---
 
-## What's included
-
-| | |
-|---|---|
-| **Workspace clones** | `revis spawn N` creates isolated local clones under `.revis/workspaces/agent-<n>/repo` |
-| **Daemon** | Pushes owned coordination refs, fetches remote ones, relays commit summaries, and rebases local workspaces when trunk moves |
-| **Monitor** | `revis status` prints attach commands, and `revis monitor` opens a live Ink view over activity and events |
-| **Promotion** | `revis promote <agent-id>` promotes one chosen workspace into managed trunk or a GitHub pull request |
+Revis is **not** an orchestrator, framework, or harness. Revis has no opinions about how your agents work. It just makes sure they can see each other's work and build on it.
 
 ### Core commands
 
@@ -28,7 +21,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 | `revis init` | Picks a coordination remote and writes `.revis/config.json` |
 | `revis spawn 4` | Creates four isolated workspaces and ensures the daemon is running |
 | `revis spawn 4 --exec 'codex --yolo'` | Starts the same command inside each workspace tmux pane |
-| `revis status` | Shows workspace state and `tmux attach ...` commands |
+| `revis status` | Shows workspace state |
 | `revis monitor` | Opens the live TUI monitor |
 | `revis promote agent-2` | Promotes one workspace into trunk or a PR |
 | `revis stop agent-2` | Stops one workspace |
@@ -98,7 +91,7 @@ Revis does not care whether that command is Codex, Claude, or anything else that
 
 ## How it works
 
-Revis is **not** an orchestrator, framework, or harness. It owns three things:
+Revis does 3 things:
 
 1. It creates isolated local clones with stable coordination refs like `revis/alice/agent-3/work`.
 2. It runs a daemon that pushes those refs, fetches everyone else's `revis/*` refs, and relays commit summaries into local tmux sessions.
@@ -107,10 +100,10 @@ Revis is **not** an orchestrator, framework, or harness. It owns three things:
 The coordination loop looks like this:
 
 ```text
-┌───────────────────────┐   post-commit    ┌──────────────────────┐   push / fetch   ┌────────────────────────┐
-│ workspace clone       │ ───────────────► │ revis daemon         │ ◄──────────────► │ revis/*/agent-*/work   │
-│ tmux session + agent  │ ◄──── relay ──── │ local runtime state  │ ── rebase sync ─► │ remote coordination refs │
-└───────────────────────┘                  └──────────────────────┘                   └────────────────────────┘
+┌───────────────────────┐   post-commit    ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
+│ workspace clone       │ ───────────────► │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
+│ tmux session + agent  │ ◄──── relay ──── │ local runtime state  │ ── rebase sync ─► │ remote coordination refs│
+└───────────────────────┘                  └──────────────────────┘                   └─────────────────────────┘
 ```
 
 Every workspace installs a `post-commit` hook that notifies the daemon immediately. The daemon baselines current local and remote heads on startup, so old history is not replayed, then it:
