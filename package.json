@@ -1,5 +1,5 @@
 {
-  "name": "revis",
+  "name": "revis-cli",
   "version": "0.1.0",
   "description": "Passive distributed workspace coordination for coding agents",
   "type": "module",

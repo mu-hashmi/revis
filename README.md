@@ -32,13 +32,19 @@ Revis is **not** an orchestrator, framework, or harness. Revis has no opinions a
 ## Install
 
 ```bash
-npm install -g revis
+npm install -g revis-cli
 ```
 
 Or run it directly:
 
 ```bash
-npx revis --help
+npx revis-cli --help
+```
+
+After install, the command is still:
+
+```bash
+revis --help
 ```
 
 <details>
