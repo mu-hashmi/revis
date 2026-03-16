@@ -1,5 +1,15 @@
 /** Shared data structures for the passive Revis CLI. */
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | {
+      [key: string]: JsonValue;
+    };
+
 export type AgentState =
   | "starting"
   | "idle"
@@ -57,6 +67,27 @@ export interface RelayRegistry {
   byBranch: Record<string, string>;
 }
 
+export interface SessionParticipant {
+  agentId: string;
+  coordinationBranch: string;
+  startedAt: string;
+  stoppedAt: string | null;
+}
+
+export interface SessionSummary {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  coordinationRemote: string;
+  trunkBase: string;
+  operatorSlug: string;
+  participantCount: number;
+}
+
+export interface SessionMeta extends SessionSummary {
+  participants: SessionParticipant[];
+}
+
 export interface RuntimeEvent {
   timestamp: string;
   type:
@@ -65,6 +96,7 @@ export interface RuntimeEvent {
     | "daemon_started"
     | "daemon_stopped"
     | "commit_relayed"
+    | "relay_received"
     | "branch_pushed"
     | "remote_branch_seen"
     | "workspace_rebased"
@@ -74,7 +106,14 @@ export interface RuntimeEvent {
     | "workspace_stopped";
   agentId?: string;
   branch?: string;
+  sha?: string;
+  sourceAgentId?: string;
+  sourceBranch?: string;
+  destinationAgentId?: string;
+  destinationBranch?: string;
+  deliveryMode?: "typed" | "queued";
   summary: string;
+  metadata?: JsonValue;
 }
 
 export interface PullRequestRef {

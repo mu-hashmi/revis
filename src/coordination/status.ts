@@ -1,4 +1,4 @@
-/** Fresh status snapshots for the CLI and Ink monitor. */
+/** Fresh status snapshots for the CLI and local dashboard. */
 
 import type {
   DaemonRecord,

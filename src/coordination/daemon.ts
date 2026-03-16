@@ -677,6 +677,11 @@ export class RevisDaemon {
         "HEAD",
         record.coordinationBranch
       );
+      const summary = await commitSummaryForRef(
+        record.repoPath,
+        "HEAD",
+        record.coordinationBranch
+      );
       record.lastPushedSha = pushedSha;
       record.lastCommitSha = pushedSha;
       delete record.lastError;
@@ -686,7 +691,11 @@ export class RevisDaemon {
         type: "branch_pushed",
         agentId: record.agentId,
         branch: record.coordinationBranch,
-        summary: `Pushed ${record.coordinationBranch} at ${pushedSha.slice(0, 8)}`
+        sha: pushedSha,
+        summary: `${record.agentId} pushed ${summary.shortSha}: ${summary.subject}`,
+        metadata: {
+          shortstat: summary.shortstat
+        }
       });
     }
   }
@@ -727,7 +736,20 @@ export class RevisDaemon {
     const message = this.formatCommitRelay(summary);
     for (const record of destinations) {
       await this.fetchRelayBranch(record, summary.branch);
-      await sendSteeringMessage(this.root, record, message);
+      const deliveryMode = await sendSteeringMessage(this.root, record, message);
+      await appendEvent(this.root, {
+        timestamp: isoNow(),
+        type: "relay_received",
+        agentId: record.agentId,
+        branch: record.coordinationBranch,
+        sha: summary.sha,
+        sourceAgentId: summary.agentId,
+        sourceBranch: summary.branch,
+        destinationAgentId: record.agentId,
+        destinationBranch: record.coordinationBranch,
+        deliveryMode,
+        summary: `${record.agentId} received ${summary.shortSha} from ${summary.operatorSlug}/${summary.agentId}`
+      });
     }
 
     await appendEvent(this.root, {
@@ -735,6 +757,9 @@ export class RevisDaemon {
       type: "commit_relayed",
       agentId: summary.agentId,
       branch: summary.branch,
+      sha: summary.sha,
+      sourceAgentId: summary.agentId,
+      sourceBranch: summary.branch,
       summary: `Relayed ${summary.shortSha} from ${summary.operatorSlug}/${summary.agentId}`
     });
   }

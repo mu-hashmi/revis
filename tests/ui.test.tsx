@@ -1,7 +1,3 @@
-import React from "react";
-import { render } from "ink-testing-library";
-
-import { MonitorApp } from "../src/cli/monitor";
 import { pathExists } from "../src/core/files";
 import { runCommand } from "../src/core/process";
 import { loadWorkspaceRecords } from "../src/coordination/runtime";
@@ -16,7 +12,7 @@ import {
   waitFor
 } from "./helpers";
 
-describe("operator status and monitor", () => {
+describe("operator status and spawn", () => {
   const cleanups = createCleanupStack();
 
   afterEach(cleanups.drain);
@@ -39,38 +35,6 @@ describe("operator status and monitor", () => {
     expect(result.stdout).toContain("agent-1");
     expect(result.stdout).toContain("[idle]");
     expect(result.stdout).not.toContain("ATTACH");
-  });
-
-  test("monitor renders workspace state and exits on q", async () => {
-    const { daemon, root } = await createWorkspaceHarness({
-      count: 1,
-      user: {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      }
-    });
-    cleanups.add(() => cleanupRepo(root, daemon));
-
-    let exitAction = "";
-    const app = render(
-      <MonitorApp
-        root={root}
-        onExit={(exit) => {
-          exitAction = exit.action;
-        }}
-      />
-    );
-
-    await waitFor(async () => (app.lastFrame() ?? "").includes("agent-1"));
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("Revis Monitor");
-    expect(frame).toContain("Workspaces");
-    expect(frame).toContain("[1] Activity");
-    expect(frame).toContain("agent-1");
-
-    app.stdin.write("q");
-    await waitFor(async () => exitAction === "quit");
-    app.unmount();
   });
 
   test("spawn creates workspaces and can run a supplied command", async () => {

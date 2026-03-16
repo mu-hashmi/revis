@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { loadConfig } from "../core/config";
 import { RevisError } from "../core/error";
 import type { WorkspaceRecord } from "../core/models";
+import { runDashboardServer } from "../coordination/dashboard";
 import { runDaemonProcess } from "../coordination/daemon";
 import { promoteWorkspace } from "../coordination/promotion";
 import { resolveRepoRoot } from "../coordination/repo";
@@ -84,12 +85,18 @@ export function buildCli(io: CliWriters = {}): Command {
   });
 
   program
-    .command("monitor", { hidden: true })
-    .description("Broken internal monitor entrypoint.")
-    .action(async () => {
-      throw new RevisError(
-        "`revis monitor` is currently broken and disabled. Use `revis status` plus the printed tmux attach command instead."
-      );
+    .command("dashboard")
+    .description("Launch the local Revis dashboard.")
+    .option("--port <port>", "bind to a specific localhost port")
+    .option("--no-open", "do not open the dashboard in a browser")
+    .action(async (options: { open?: boolean; port?: string }) => {
+      const root = await requireInitializedRoot(process.cwd());
+      await runDashboardServer(root, {
+        noOpen: options.open === false,
+        stderr: writeErr,
+        stdout: writeOut,
+        ...(options.port ? { port: parsePort(options.port) } : {})
+      });
     });
 
   program
@@ -171,6 +178,16 @@ function parseCount(value: string): number {
   }
 
   return count;
+}
+
+/** Parse one TCP port from the command line. */
+function parsePort(value: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new RevisError(`Expected a TCP port between 0 and 65535, got: ${value}`);
+  }
+
+  return port;
 }
 
 /** Create a workspace batch and print the resulting sessions. */

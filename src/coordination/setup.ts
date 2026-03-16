@@ -54,8 +54,10 @@ export async function initializeProject(root: string): Promise<RevisConfig> {
 export async function ensureGitignore(root: string): Promise<void> {
   const path = join(root, ".gitignore");
   const lines = [
-    "# Revis runtime state stays local because it only drives monitor/status views.",
+    "# Revis runtime state stays local because it only drives local status and dashboard views.",
     ".revis/runtime/",
+    "# Session archives keep local run history for the dashboard.",
+    ".revis/sessions/",
     "# Local workspaces are disposable clones, not project source.",
     ".revis/workspaces/",
     "# Local mode uses a hidden bare coordination remote as an implementation detail.",

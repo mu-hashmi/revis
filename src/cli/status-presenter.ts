@@ -1,4 +1,4 @@
-/** Shared operator-facing status formatting for the CLI and Ink monitor. */
+/** Shared operator-facing status formatting for the CLI status view and dashboard data. */
 
 import type { StatusSnapshot } from "../coordination/status";
 import type { StatusWorkspaceRecord, WorkspaceRecord } from "../core/models";
@@ -17,7 +17,7 @@ const ANSI = {
   yellow: "\u001b[33m"
 } as const;
 
-/** Format the daemon health line shared by CLI status and the monitor. */
+/** Format the daemon health line shared by CLI status and dashboard summaries. */
 export function formatDaemonHealth(snapshot: StatusSnapshot): string {
   const socketPath = snapshot.daemon?.socketPath ?? daemonSocketPath(snapshot.root);
   return `daemon ${snapshot.daemonHealthy ? "up" : "down"} ${socketPath}`;
@@ -28,7 +28,7 @@ export function formatStatusContext(snapshot: StatusSnapshot): string {
   return `operator ${snapshot.operatorSlug} remote ${snapshot.config.coordinationRemote} base ${snapshot.syncBranch}`;
 }
 
-/** Format the common workspace summary text shared by CLI and monitor views. */
+/** Format the common workspace summary text shared by CLI status and dashboard views. */
 export function formatWorkspaceSummary(workspace: WorkspaceRecord): string {
   const fields = [
     `last=${workspace.lastCommitSha!.slice(0, 8)}`,

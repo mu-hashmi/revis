@@ -5,7 +5,14 @@ import { RevisError } from "../core/error";
 import { daemonSocketPath } from "../core/ipc";
 import { runCommand } from "../core/process";
 import { ensureDaemonRunning, notifyDaemon, stopDaemon } from "./daemon";
-import { clearRuntime, loadWorkspaceRecord, loadWorkspaceRecords } from "./runtime";
+import { deriveOperatorSlug } from "./repo";
+import {
+  clearRuntime,
+  ensureLiveSession,
+  finalizeLiveSession,
+  loadWorkspaceRecord,
+  loadWorkspaceRecords
+} from "./runtime";
 import { createWorkspaces, runCommandInWorkspaces, stopWorkspaces } from "./workspaces";
 
 export interface WorkspaceBatchOptions {
@@ -20,6 +27,12 @@ export async function prepareWorkspaceBatch(
   options: WorkspaceBatchOptions
 ): Promise<WorkspaceRecord[]> {
   await ensureTmuxReady();
+
+  await ensureLiveSession(root, {
+    coordinationRemote: config.coordinationRemote,
+    trunkBase: config.trunkBase,
+    operatorSlug: await deriveOperatorSlug(root)
+  });
 
   // Bring the daemon fully online before any fresh workspace starts running user code.
   // Otherwise the daemon's own startup sync can overlap the first agent-side git commands.
@@ -62,6 +75,7 @@ export async function stopWorkspace(root: string, agentId: string): Promise<void
     return;
   }
 
+  await finalizeLiveSession(root);
   await clearRuntime(root);
 }
 
@@ -70,6 +84,7 @@ export async function stopWorkspaceBatch(root: string): Promise<number> {
   const workspaces = await loadWorkspaceRecords(root);
   await stopDaemon(root);
   await stopWorkspaces(root, workspaces);
+  await finalizeLiveSession(root);
   await clearRuntime(root);
   return workspaces.length;
 }

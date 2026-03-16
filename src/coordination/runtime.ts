@@ -1,14 +1,26 @@
-/** JSON-backed runtime state for status and monitor views. */
+/** JSON-backed runtime and session persistence for local Revis state. */
 
-import { join } from "node:path";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+  lstat,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 
 import type {
   DaemonRecord,
   RelayRegistry,
   RuntimeEvent,
+  SessionMeta,
+  SessionParticipant,
+  SessionSummary,
   WorkspaceRecord
 } from "../core/models";
+import { RevisError } from "../core/error";
 import {
   appendJsonl,
   ensureDir,
@@ -16,15 +28,41 @@ import {
   readJson,
   writeJson
 } from "../core/files";
+import { isoNow } from "../core/time";
 
 const RUNTIME_DIR = join(".revis", "runtime");
-const EVENT_LIMIT = 500;
+const SESSIONS_DIR = join(".revis", "sessions");
 const ACTIVITY_LINE_LIMIT = 200;
 const ACTIVITY_BYTE_LIMIT = 128_000;
 
 /** Return the runtime root directory. */
 export function runtimeDir(root: string): string {
   return join(root, RUNTIME_DIR);
+}
+
+/** Return the session archive root. */
+export function sessionsDir(root: string): string {
+  return join(root, SESSIONS_DIR);
+}
+
+/** Return the session index path. */
+export function sessionsIndexPath(root: string): string {
+  return join(sessionsDir(root), "index.json");
+}
+
+/** Return one archived session directory. */
+export function sessionDir(root: string, sessionId: string): string {
+  return join(sessionsDir(root), sessionId);
+}
+
+/** Return one session metadata path. */
+export function sessionMetaPath(root: string, sessionId: string): string {
+  return join(sessionDir(root, sessionId), "meta.json");
+}
+
+/** Return one session event-log path. */
+export function sessionEventsPath(root: string, sessionId: string): string {
+  return join(sessionDir(root, sessionId), "events.jsonl");
 }
 
 /** Return the workspace runtime directory. */
@@ -62,11 +100,19 @@ export function activityPath(root: string, agentId: string): string {
   return join(activityDir(root), `${agentId}.log`);
 }
 
-/** Ensure the runtime root exists. */
+/** Ensure the live runtime directories exist. */
 export async function ensureRuntime(root: string): Promise<void> {
   await ensureDir(runtimeDir(root));
   await ensureDir(workspacesDir(root));
   await ensureDir(activityDir(root));
+}
+
+/** Ensure the session archive root exists. */
+export async function ensureSessionsRoot(root: string): Promise<void> {
+  await ensureDir(sessionsDir(root));
+  if (!(await pathExists(sessionsIndexPath(root)))) {
+    await writeJson(sessionsIndexPath(root), []);
+  }
 }
 
 /** Persist one workspace runtime record. */
@@ -95,7 +141,6 @@ export async function loadWorkspaceRecords(root: string): Promise<WorkspaceRecor
     return [];
   }
 
-  const { readdir } = await import("node:fs/promises");
   const entries = await readdir(directory);
   const records = await Promise.all(
     entries
@@ -159,38 +204,207 @@ export async function deleteRelayRegistry(root: string): Promise<void> {
   await rm(relayRegistryPath(root), { force: true });
 }
 
-/** Append one runtime event and enforce a bounded live log. */
+/** Ensure one live session exists and return its metadata. */
+export async function ensureLiveSession(
+  root: string,
+  session: {
+    coordinationRemote: string;
+    trunkBase: string;
+    operatorSlug: string;
+  }
+): Promise<SessionMeta> {
+  await ensureSessionsRoot(root);
+
+  const existing = await loadLiveSession(root);
+  if (existing) {
+    await pointRuntimeEventsToSession(root, existing.id);
+    return existing;
+  }
+
+  const meta: SessionMeta = {
+    id: `sess-${randomBytes(4).toString("hex")}`,
+    startedAt: isoNow(),
+    endedAt: null,
+    coordinationRemote: session.coordinationRemote,
+    trunkBase: session.trunkBase,
+    operatorSlug: session.operatorSlug,
+    participants: [],
+    participantCount: 0
+  };
+
+  await writeSessionMeta(root, meta);
+  await pointRuntimeEventsToSession(root, meta.id);
+  return meta;
+}
+
+/** Load every session summary in newest-first order. */
+export async function loadSessionIndex(root: string): Promise<SessionSummary[]> {
+  if (!(await pathExists(sessionsIndexPath(root)))) {
+    return [];
+  }
+
+  return readJson<SessionSummary[]>(sessionsIndexPath(root));
+}
+
+/** Load one session metadata record. */
+export async function loadSessionMeta(
+  root: string,
+  sessionId: string
+): Promise<SessionMeta | null> {
+  return loadRuntimeJsonOrNull(sessionMetaPath(root, sessionId));
+}
+
+/** Load the sole live session, if present. */
+export async function loadLiveSession(root: string): Promise<SessionMeta | null> {
+  const index = await loadSessionIndex(root);
+  const live = index.filter((session) => session.endedAt === null);
+  if (live.length === 0) {
+    return null;
+  }
+
+  if (live.length > 1) {
+    throw new RevisError("Session index is corrupted: multiple live sessions found");
+  }
+
+  const meta = await loadSessionMeta(root, live[0]!.id);
+  if (!meta) {
+    throw new RevisError(
+      `Session index is corrupted: missing meta for ${live[0]!.id}`
+    );
+  }
+
+  return meta;
+}
+
+/** Load one session's events from disk. */
+export async function loadSessionEvents(
+  root: string,
+  sessionId: string,
+  limit?: number
+): Promise<RuntimeEvent[]> {
+  return readEventLog(sessionEventsPath(root, sessionId), limit);
+}
+
+/** Register new or revived participants on the current live session. */
+export async function registerSessionParticipants(
+  root: string,
+  records: WorkspaceRecord[]
+): Promise<void> {
+  if (records.length === 0) {
+    return;
+  }
+
+  const session = await requireLiveSession(root);
+  const participants = [...session.participants];
+
+  for (const record of records) {
+    const existingIndex = participants.findIndex(
+      (participant) => participant.agentId === record.agentId
+    );
+    if (existingIndex === -1) {
+      participants.push({
+        agentId: record.agentId,
+        coordinationBranch: record.coordinationBranch,
+        startedAt: record.createdAt,
+        stoppedAt: null
+      });
+      continue;
+    }
+
+    participants[existingIndex] = {
+      ...participants[existingIndex]!,
+      coordinationBranch: record.coordinationBranch,
+      stoppedAt: null
+    };
+  }
+
+  await writeSessionMeta(root, {
+    ...session,
+    participants: sortParticipants(participants),
+    participantCount: participants.length
+  });
+}
+
+/** Mark one participant as stopped inside the live session metadata. */
+export async function markSessionParticipantStopped(
+  root: string,
+  record: Pick<WorkspaceRecord, "agentId" | "coordinationBranch" | "createdAt">,
+  stoppedAt = isoNow()
+): Promise<void> {
+  const session = await requireLiveSession(root);
+  const participants = [...session.participants];
+  const existingIndex = participants.findIndex(
+    (participant) => participant.agentId === record.agentId
+  );
+
+  if (existingIndex === -1) {
+    participants.push({
+      agentId: record.agentId,
+      coordinationBranch: record.coordinationBranch,
+      startedAt: record.createdAt,
+      stoppedAt
+    });
+  } else {
+    participants[existingIndex] = {
+      ...participants[existingIndex]!,
+      coordinationBranch: record.coordinationBranch,
+      stoppedAt
+    };
+  }
+
+  await writeSessionMeta(root, {
+    ...session,
+    participants: sortParticipants(participants),
+    participantCount: participants.length
+  });
+}
+
+/** Finalize the current live session and freeze its metadata. */
+export async function finalizeLiveSession(
+  root: string,
+  endedAt = isoNow()
+): Promise<SessionMeta | null> {
+  const session = await loadLiveSession(root);
+  if (!session) {
+    return null;
+  }
+
+  const participants = session.participants.map((participant) => ({
+    ...participant,
+    stoppedAt: participant.stoppedAt ?? endedAt
+  }));
+
+  const finalized = {
+    ...session,
+    endedAt,
+    participants,
+    participantCount: participants.length
+  };
+  await writeSessionMeta(root, finalized);
+  return finalized;
+}
+
+/** Append one runtime event to the active session log. */
 export async function appendEvent(
   root: string,
   event: RuntimeEvent
 ): Promise<void> {
-  await ensureRuntime(root);
-  const path = eventsPath(root);
-  await appendJsonl(path, event as unknown as Record<string, unknown>);
+  const session = await requireLiveSession(root);
 
-  const lines = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
-  if (lines.length > EVENT_LIMIT) {
-    const keep = lines.slice(-EVENT_LIMIT);
-    await writeFile(path, `${keep.join("\n")}\n`, "utf8");
-  }
+  await ensureRuntime(root);
+  await pointRuntimeEventsToSession(root, session.id);
+  await appendJsonl(
+    sessionEventsPath(root, session.id),
+    event as unknown as Record<string, unknown>
+  );
 }
 
-/** Load recent runtime events. */
+/** Load recent runtime events from the live log symlink. */
 export async function loadEvents(
   root: string,
   limit?: number
 ): Promise<RuntimeEvent[]> {
-  const path = eventsPath(root);
-  if (!(await pathExists(path))) {
-    return [];
-  }
-
-  let lines = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
-  if (limit !== undefined) {
-    lines = lines.slice(-limit);
-  }
-
-  return lines.map((line) => JSON.parse(line) as RuntimeEvent);
+  return readEventLog(eventsPath(root), limit);
 }
 
 /** Persist a bounded activity snapshot for one workspace. */
@@ -250,6 +464,92 @@ async function loadRuntimeJsonOrNull<T>(path: string): Promise<T | null> {
   return readJson<T>(path);
 }
 
+/** Persist one session metadata file and refresh the session index summary. */
+async function writeSessionMeta(root: string, meta: SessionMeta): Promise<void> {
+  await ensureSessionsRoot(root);
+  await writeJson(sessionMetaPath(root, meta.id), meta);
+
+  const index = await loadSessionIndex(root);
+  const nextIndex = index.filter((session) => session.id !== meta.id);
+  nextIndex.push({
+    id: meta.id,
+    startedAt: meta.startedAt,
+    endedAt: meta.endedAt,
+    coordinationRemote: meta.coordinationRemote,
+    trunkBase: meta.trunkBase,
+    operatorSlug: meta.operatorSlug,
+    participantCount: meta.participantCount
+  });
+
+  nextIndex.sort(
+    (left, right) =>
+      new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime()
+  );
+  await writeJson(sessionsIndexPath(root), nextIndex);
+}
+
+/** Read one JSONL event log from disk. */
+async function readEventLog(
+  path: string,
+  limit?: number
+): Promise<RuntimeEvent[]> {
+  if (!(await pathExists(path))) {
+    return [];
+  }
+
+  let lines = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
+  if (limit !== undefined) {
+    lines = lines.slice(-limit);
+  }
+
+  return lines.map((line) => JSON.parse(line) as RuntimeEvent);
+}
+
+/** Require that one and only one live session exists. */
+async function requireLiveSession(root: string): Promise<SessionMeta> {
+  const session = await loadLiveSession(root);
+  if (!session) {
+    throw new RevisError("No live Revis session exists");
+  }
+
+  return session;
+}
+
+/** Point the runtime event-log path at the current session archive. */
+async function pointRuntimeEventsToSession(
+  root: string,
+  sessionId: string
+): Promise<void> {
+  await ensureRuntime(root);
+  await ensureDir(sessionDir(root, sessionId));
+  await writeFile(sessionEventsPath(root, sessionId), "", {
+    encoding: "utf8",
+    flag: "a"
+  });
+
+  const linkPath = eventsPath(root);
+  if (await pathExists(linkPath) || (await runtimeEntryExists(linkPath))) {
+    await rm(linkPath, { force: true });
+  }
+
+  const targetPath = relative(dirname(linkPath), sessionEventsPath(root, sessionId));
+  await symlink(targetPath, linkPath);
+}
+
+/** Return whether a runtime path exists even when it is a symlink. */
+async function runtimeEntryExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
 interface LegacyWorkspaceRecord extends Omit<WorkspaceRecord, "coordinationBranch" | "localBranch"> {
   branch: string;
 }
@@ -267,6 +567,24 @@ function normalizeWorkspaceRecord(
     coordinationBranch: record.branch,
     localBranch: record.branch
   };
+}
+
+/** Keep participants ordered in natural agent order for the dashboard lanes. */
+function sortParticipants(participants: SessionParticipant[]): SessionParticipant[] {
+  return participants
+    .slice()
+    .sort((left, right) => compareAgentIds(left.agentId, right.agentId));
+}
+
+/** Compare agent ids like `agent-2` numerically before lexical fallback. */
+function compareAgentIds(left: string, right: string): number {
+  const leftMatch = /^agent-(\d+)$/.exec(left);
+  const rightMatch = /^agent-(\d+)$/.exec(right);
+  if (leftMatch && rightMatch) {
+    return Number(leftMatch[1]) - Number(rightMatch[1]);
+  }
+
+  return left.localeCompare(right);
 }
 
 /** Trim activity lines to the configured line and byte budgets. */

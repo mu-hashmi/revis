@@ -96,10 +96,15 @@ Revis keeps its local runtime state under `.revis/`:
 .revis/
   config.json
   coordination.git/        # only in revis-local mode
+  sessions/
+    index.json
+    sess-1234abcd/
+      meta.json
+      events.jsonl
   runtime/
     daemon.json
     relays.json
-    events.jsonl
+    events.jsonl           # symlink to the current live session log
     workspaces/
     activity/
   workspaces/
@@ -111,7 +116,7 @@ Revis keeps its local runtime state under `.revis/`:
           hook-client.cjs
 ```
 
-These files are local operator state. `revis init` adds the local runtime paths to `.gitignore`.
+These files are local operator state. `revis init` adds the runtime, session archive, and workspace paths to `.gitignore`.
 
 ---
 
@@ -175,6 +180,7 @@ Revis does not care whether that command is Codex, Claude, or anything else that
 
 ### 3. Inspect and attach
 
+- `revis dashboard` launches the local timeline dashboard in your browser.
 - `revis status` prints a compact table with workspace state and attach commands.
 - Attach directly with the printed `tmux attach -t ...` command for the workspace you want to inspect.
 

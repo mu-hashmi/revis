@@ -14,7 +14,11 @@ import {
   appendEvent,
   deleteActivitySnapshot,
   deleteWorkspaceRecord,
+  ensureLiveSession,
+  finalizeLiveSession,
   loadWorkspaceRecords,
+  markSessionParticipantStopped,
+  registerSessionParticipants,
   writeActivitySnapshot,
   writeWorkspaceRecord
 } from "./runtime";
@@ -97,6 +101,12 @@ export async function createWorkspaces(
   const syncBranch = syncTargetBranch(remoteName, config.trunkBase);
   const agentIds = await allocateAgentIds(root, count);
 
+  await ensureLiveSession(root, {
+    coordinationRemote: config.coordinationRemote,
+    trunkBase: config.trunkBase,
+    operatorSlug
+  });
+
   const created: WorkspaceRecord[] = [];
   for (const agentId of agentIds) {
     created.push(
@@ -112,6 +122,7 @@ export async function createWorkspaces(
     );
   }
 
+  await registerSessionParticipants(root, created);
   return created;
 }
 
@@ -154,6 +165,7 @@ export async function stopWorkspaces(
       summary: `Stopped ${record.agentId}`,
       type: "workspace_stopped"
     });
+    await markSessionParticipantStopped(root, record);
     await deleteWorkspaceRecord(root, record.agentId);
     await deleteActivitySnapshot(root, record.agentId);
   }
@@ -164,7 +176,12 @@ export async function refreshWorkspaceRecord(
   root: string,
   record: WorkspaceRecord
 ): Promise<WorkspaceRecord> {
+  const previousState = record.state;
   await updateWorkspaceSessionState(record);
+
+  if (record.state === "stopped" && previousState !== "stopped") {
+    await markSessionParticipantStopped(root, record);
+  }
 
   if (await pathExists(record.repoPath)) {
     record.lastCommitSha = await currentHeadSha(record.repoPath);
@@ -178,6 +195,10 @@ export async function refreshWorkspaceRecord(
 
   await flushQueuedSteeringMessages(root, record);
 
+  if (record.state !== "stopped" && previousState === "stopped") {
+    await registerSessionParticipants(root, [record]);
+  }
+
   await writeWorkspaceRecord(root, record);
   return record;
 }
@@ -190,6 +211,10 @@ export async function refreshWorkspaceSnapshots(
   for (const record of records) {
     await refreshWorkspaceRecord(root, record);
     await captureWorkspaceActivity(root, record);
+  }
+
+  if (records.length > 0 && records.every((record) => record.state === "stopped")) {
+    await finalizeLiveSession(root);
   }
 
   return records;
@@ -273,20 +298,21 @@ export async function sendSteeringMessage(
   root: string,
   record: WorkspaceRecord,
   message: string
-): Promise<void> {
+): Promise<"queued" | "typed"> {
   if (!(await tmuxSessionExists(record.tmuxSession))) {
     record.lastError = `Missing tmux session ${record.tmuxSession}`;
     await queueSteeringMessage(root, record, message);
-    return;
+    return "queued";
   }
 
   if (await workspaceAcceptsSteeringMessages(record)) {
     await flushQueuedSteeringMessages(root, record);
     await deliverSteeringMessage(record, message);
-    return;
+    return "typed";
   }
 
   await queueSteeringMessage(root, record, message);
+  return "queued";
 }
 
 /** Refresh the runtime state derived from the workspace tmux session. */
