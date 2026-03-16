@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .venv/
 rendered.png
+uv.lock

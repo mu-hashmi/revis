@@ -13,7 +13,6 @@ From a local Revis clone:
 cd ~/mandelbrot-demo
 revis init
 revis spawn 4 --exec 'codex --yolo "Read program.md and begin the loop."'
-revis monitor
 ```
 
 Claude example:
@@ -23,7 +22,6 @@ Claude example:
 cd ~/mandelbrot-demo
 revis init
 revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and begin the loop."'
-revis monitor
 ```
 
 The loop itself is agent-neutral. Revis just starts tmux-backed workspaces and relays commit summaries.

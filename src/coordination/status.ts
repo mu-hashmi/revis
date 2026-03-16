@@ -40,9 +40,17 @@ export interface StatusSnapshot {
 /** Load a consistent snapshot of daemon and workspace runtime state. */
 export async function loadStatusSnapshot(
   root: string,
-  options: { refresh?: boolean; eventLimit?: number } = {}
+  options: {
+    eventLimit?: number;
+    includeGitDetails?: boolean;
+    refresh?: boolean;
+  } = {}
 ): Promise<StatusSnapshot> {
-  const { refresh = false, eventLimit = 12 } = options;
+  const {
+    includeGitDetails = true,
+    refresh = false,
+    eventLimit = 12
+  } = options;
 
   const config = await loadConfig(root);
   const operatorSlug = await deriveOperatorSlug(root);
@@ -54,11 +62,14 @@ export async function loadStatusSnapshot(
     await refreshWorkspaceSnapshots(root, workspaces);
   }
 
-  const statusWorkspaces = await loadWorkspaceStatus(
-    workspaces,
-    config.coordinationRemote,
-    syncBranch
-  );
+  const statusWorkspaces = includeGitDetails
+    ? await loadWorkspaceStatus(workspaces, config.coordinationRemote, syncBranch)
+    : workspaces.map((workspace) => ({
+        ...workspace,
+        commitCount: 0,
+        lastCommitShortSha: workspace.lastCommitSha?.slice(0, 8) ?? "",
+        lastCommitSubject: ""
+      }));
   const activity = await loadActivityMap(root, statusWorkspaces);
   const daemonHealthy = await loadDaemonHealth(root, daemon);
 

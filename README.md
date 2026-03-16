@@ -25,7 +25,6 @@ Export it into its own lightweight repo before you run Revis so workspace clones
 cd ~/mandelbrot-demo
 revis init
 revis spawn 4 --exec 'codex --yolo "Read program.md and begin the loop."'
-revis monitor
 ```
 
 Claude example:
@@ -35,7 +34,6 @@ Claude example:
 cd ~/mandelbrot-demo
 revis init
 revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and begin the loop."'
-revis monitor
 ```
 
 ## How it works
@@ -175,11 +173,10 @@ Use `revis spawn N` if you only want the workspaces and daemon. Use `--exec '<co
 
 Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a tmux session.
 
-### 3. Monitor and attach
+### 3. Inspect and attach
 
 - `revis status` prints a compact table with workspace state and attach commands.
-- `revis monitor` opens an Ink TUI with workspace activity and event streams.
-- `Enter` or `a` attaches, `j` and `k` move, `Tab` or `1` and `2` switch panes, `r` refreshes, and `q` quits.
+- Attach directly with the printed `tmux attach -t ...` command for the workspace you want to inspect.
 
 ---
 

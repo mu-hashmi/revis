@@ -6,7 +6,7 @@ import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import type { RevisConfig, WorkspaceRecord } from "../core/models";
 import { RevisError } from "../core/error";
 import { ensureDir, pathExists } from "../core/files";
-import { runCommand, runInteractive, shellJoin } from "../core/process";
+import { runCommand, runInteractive, shellJoin, sleep } from "../core/process";
 import { sha256Text } from "../core/text";
 import { isoNow } from "../core/time";
 import { appendMissingLines } from "../core/text-files";
@@ -34,6 +34,11 @@ import {
 
 const WORKSPACES_DIR = join(".revis", "workspaces");
 const HOOK_CLIENT_NAME = "hook-client.cjs";
+const CODEX_INTERRUPT_TIMEOUT_MS = 5_000;
+const CODEX_INTERRUPT_POLL_MS = 250;
+const CODEX_INTERRUPT_SETTLE_MS = 250;
+const CODEX_POST_TYPE_SETTLE_MS = 150;
+const CODEX_STATUS_TAIL_LINES = 8;
 
 /** Return the path to one workspace clone. */
 export function workspaceRepoPath(root: string, agentId: string): string {
@@ -541,8 +546,36 @@ async function deliverSteeringMessage(
   record: WorkspaceRecord,
   message: string
 ): Promise<void> {
-  const submitKey = await steeringSubmitKey(record);
+  await typeSteeringMessage(record, message);
 
+  const agent = relayAgentAdapter(record);
+  if (agent !== "codex") {
+    await submitSteeringMessage(record, "Enter");
+    return;
+  }
+
+  await sleep(CODEX_POST_TYPE_SETTLE_MS);
+
+  const lines = await currentPaneLines(record);
+  if (!codexNeedsQueuedMessage(lines)) {
+    await submitSteeringMessage(record, "Enter");
+    return;
+  }
+
+  if (await interruptCodexTurn(record)) {
+    await sleep(CODEX_INTERRUPT_SETTLE_MS);
+    await submitSteeringMessage(record, "Enter");
+    return;
+  }
+
+  await submitSteeringMessage(record, "Tab");
+}
+
+/** Type one steering message into the active workspace pane without submitting it. */
+async function typeSteeringMessage(
+  record: WorkspaceRecord,
+  message: string
+): Promise<void> {
   await runCommand([
     "tmux",
     "send-keys",
@@ -551,7 +584,13 @@ async function deliverSteeringMessage(
     "-l",
     message
   ]);
+}
 
+/** Submit the current steering message draft with one tmux keypress. */
+async function submitSteeringMessage(
+  record: WorkspaceRecord,
+  submitKey: "Enter" | "Tab"
+): Promise<void> {
   await runCommand([
     "tmux",
     "send-keys",
@@ -561,23 +600,28 @@ async function deliverSteeringMessage(
   ]);
 }
 
-/** Choose how Revis should submit one relay into the active pane. */
-async function steeringSubmitKey(record: WorkspaceRecord): Promise<"Enter" | "Tab"> {
-  const agent = relayAgentAdapter(record);
-  if (!agent) {
-    return "Enter";
+/** Interrupt Codex's current turn so a relay can land as a real user message. */
+async function interruptCodexTurn(record: WorkspaceRecord): Promise<boolean> {
+  const deadline = Date.now() + CODEX_INTERRUPT_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    await runCommand([
+      "tmux",
+      "send-keys",
+      "-t",
+      `${record.tmuxSession}:0`,
+      "Escape"
+    ]);
+
+    await sleep(CODEX_INTERRUPT_POLL_MS);
+
+    const lines = await currentPaneLines(record);
+    if (!codexNeedsQueuedMessage(lines)) {
+      return true;
+    }
   }
 
-  if (agent === "claude") {
-    return "Enter";
-  }
-
-  const lines = await currentPaneLines(record);
-  if (codexNeedsQueuedMessage(lines)) {
-    return "Tab";
-  }
-
-  return "Enter";
+  return false;
 }
 
 /** Start one operator command in a fresh pane that returns to a login shell on exit. */
@@ -664,7 +708,9 @@ function relayAgentAdapter(record: WorkspaceRecord): "claude" | "codex" | undefi
 
 /** Return whether the visible Codex UI expects Tab to queue a busy-session message. */
 function codexNeedsQueuedMessage(lines: string[]): boolean {
-  return lines.some((line) => line.toLowerCase().includes("tab to queue message"));
+  return lines
+    .slice(-CODEX_STATUS_TAIL_LINES)
+    .some((line) => line.toLowerCase().includes("tab to queue message"));
 }
 
 /** Return the tmux pane PID for one workspace session. */

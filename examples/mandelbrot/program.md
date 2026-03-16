@@ -42,7 +42,7 @@ When you see a promising relay:
 
 1. Compare the relayed time to your current best.
 2. Inspect the change with `git show <sha> -- render.py`.
-3. If needed, inspect the workspace branch directly with `git show revis/<operator>/agent-<n>/work -- render.py`.
+3. If needed, inspect nearby history with `git log --decorate --oneline --all -- render.py`.
 4. Factor the useful idea into your next hypothesis instead of repeating the same experiment.
 
 ---
@@ -65,7 +65,7 @@ If an optimization changes the checksum, it failed.
 
 ## 5. Commit Convention
 
-Every benchmarked experiment gets a commit with this exact subject shape:
+Every benchmarked render.py change gets a commit with this exact subject shape:
 
 ```text
 bench: 4.821s | symmetry | exploit horizontal symmetry
@@ -78,6 +78,9 @@ Rules:
 - End with a concise description of what changed.
 - Commit only `render.py`.
 - Do not rely on commit bodies for provenance.
+- The initial baseline benchmark may reuse the existing `HEAD` commit if you have
+  not changed `render.py` yet. Log that baseline in `results.tsv` and `notes.md`
+  instead of creating a no-op commit.
 
 This format is what makes Revis relays instantly scannable.
 
@@ -101,10 +104,14 @@ Use `notes.md` to track:
 
 - your current best commit and time
 - ideas worth retrying
-- relay messages worth combining
+- relay SHAs or brief reminders worth combining
 - failure patterns to avoid
 
 Do not commit `results.tsv` or `notes.md`.
+Do not copy another agent's benchmark ledger into your local files. `results.tsv`
+must contain only experiments you ran in this workspace. `notes.md` may mention
+relay SHAs as prompts for future work, but do not transcribe another agent's
+time/category/description unless you reran that idea locally.
 
 ---
 
@@ -126,7 +133,8 @@ LOOP FOREVER:
        - return render.py to the best-known commit
        - continue
   8. If correct=true:
-       - commit the experiment with the required bench: subject
+       - if this run changed render.py relative to the best-known baseline, commit it with the required bench: subject
+       - if this run is only the initial baseline benchmark of the current HEAD, do not create a no-op commit
        - append a row to results.tsv
        - update notes.md
   9. If the experiment beat your best time:

@@ -72,6 +72,17 @@ describe("workspace coordination", () => {
       );
     });
 
+    await waitFor(async () => {
+      const result = await runCommand(
+        ["git", "rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
+        {
+          cwd: workspaces[1]!.repoPath,
+          check: false
+        }
+      );
+      return result.exitCode === 0 && result.stdout.trim() === sha;
+    });
+
     const records = await loadWorkspaceRecords(root);
     expect(records.find((record) => record.agentId === "agent-1")?.lastRelayedSha).toBe(
       sha
@@ -204,7 +215,7 @@ describe("workspace coordination", () => {
       1,
       daemonSocketPath(aliceRoot)
     );
-    await createWorkspaces(
+    const bobWorkspaces = await createWorkspaces(
       bobRoot,
       bobConfig,
       1,
@@ -233,6 +244,17 @@ describe("workspace coordination", () => {
         ) ?? false
       );
     }, 12_000);
+
+    await waitFor(async () => {
+      const result = await runCommand(
+        ["git", "rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
+        {
+          cwd: bobWorkspaces[0]!.repoPath,
+          check: false
+        }
+      );
+      return result.exitCode === 0 && result.stdout.trim() === sha;
+    });
   });
 
   test("daemon startup baselines existing remote heads instead of replaying them", async () => {

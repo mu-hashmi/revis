@@ -1,6 +1,11 @@
-/** Ink monitor for live daemon and workspace state. */
+/**
+ * Broken Ink monitor for live daemon and workspace state.
+ *
+ * This code is intentionally kept in-tree for future repair, but the public
+ * `revis monitor` command is disabled and hidden from user-facing docs.
+ */
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import type { WorkspaceRecord } from "../core/models";
@@ -31,8 +36,8 @@ export interface MonitorProps {
 export function MonitorApp({ root, onExit }: MonitorProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const [refreshTick, setRefreshTick] = useState(0);
-  const snapshot = useMonitorSnapshot(root, refreshTick);
+  const [manualRefreshTick, setManualRefreshTick] = useState(0);
+  const snapshot = useMonitorSnapshot(root, manualRefreshTick);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [tab, setTab] = useState<MonitorTab>("activity");
 
@@ -43,7 +48,7 @@ export function MonitorApp({ root, onExit }: MonitorProps): React.JSX.Element {
       key,
       onExit,
       refresh: () => {
-        setRefreshTick((current) => current + 1);
+        setManualRefreshTick((current) => current + 1);
       },
       selectedIndex,
       setSelectedIndex,
@@ -84,33 +89,81 @@ export function MonitorApp({ root, onExit }: MonitorProps): React.JSX.Element {
 /** Poll the runtime snapshot that backs the monitor UI. */
 function useMonitorSnapshot(
   root: string,
-  refreshTick: number
+  manualRefreshTick: number
 ): StatusSnapshot | null {
   const [snapshot, setSnapshot] = useState<StatusSnapshot | null>(null);
+  const snapshotFingerprint = useRef("");
 
   useEffect(() => {
     let active = true;
 
-    const refresh = async (): Promise<void> => {
-      const next = await loadStatusSnapshot(root, {
-        refresh: true
-      });
-      if (active) {
-        setSnapshot(next);
+    const applySnapshot = (next: StatusSnapshot): void => {
+      const fingerprint = JSON.stringify(next);
+      if (!active || fingerprint === snapshotFingerprint.current) {
+        return;
       }
+
+      snapshotFingerprint.current = fingerprint;
+      setSnapshot(next);
+    };
+
+    const refresh = async (): Promise<void> => {
+      applySnapshot(
+        await loadStatusSnapshot(root, {
+          includeGitDetails: false,
+          refresh: true
+        })
+      );
+    };
+
+    const poll = async (): Promise<void> => {
+      applySnapshot(
+        await loadStatusSnapshot(root, {
+          includeGitDetails: false,
+          refresh: false
+        })
+      );
     };
 
     void refresh();
 
     const timer = setInterval(() => {
-      void refresh();
+      void poll();
     }, REFRESH_INTERVAL_MS);
 
     return () => {
       active = false;
       clearInterval(timer);
     };
-  }, [refreshTick, root]);
+  }, [root]);
+
+  useEffect(() => {
+    if (manualRefreshTick === 0) {
+      return;
+    }
+
+    let active = true;
+
+    const refresh = async (): Promise<void> => {
+      const next = await loadStatusSnapshot(root, {
+        includeGitDetails: false,
+        refresh: true
+      });
+      const fingerprint = JSON.stringify(next);
+      if (!active || fingerprint === snapshotFingerprint.current) {
+        return;
+      }
+
+      snapshotFingerprint.current = fingerprint;
+      setSnapshot(next);
+    };
+
+    void refresh();
+
+    return () => {
+      active = false;
+    };
+  }, [manualRefreshTick, root]);
 
   return snapshot;
 }

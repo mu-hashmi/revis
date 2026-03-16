@@ -726,6 +726,7 @@ export class RevisDaemon {
 
     const message = this.formatCommitRelay(summary);
     for (const record of destinations) {
+      await this.fetchRelayBranch(record, summary.branch);
       await sendSteeringMessage(this.root, record, message);
     }
 
@@ -741,6 +742,15 @@ export class RevisDaemon {
   /** Format the single-line steering message for one commit. */
   private formatCommitRelay(summary: CommitSummary): string {
     return `[revis] ${summary.shortSha} ${summary.operatorSlug}/${summary.agentId}: ${summary.subject} (${summary.shortstat})`;
+  }
+
+  /** Fetch the relayed coordination branch into one workspace clone before fan-out. */
+  private async fetchRelayBranch(
+    record: WorkspaceRecord,
+    branch: string
+  ): Promise<void> {
+    await assertWorkspaceRepoExists(record);
+    await fetchRemoteRefs(record.repoPath, this.config.coordinationRemote, [branch]);
   }
 
   /** Rebase one clean workspace branch onto the fetched sync target. */
