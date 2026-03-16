@@ -14,6 +14,30 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 
 Revis is **not** an orchestrator, framework, or harness. Revis has no opinions about how your agents work. It just makes sure they can see each other's work and build on it.
 
+## Demo
+
+The fastest way to see Revis in action is the Mandelbrot speedrun source under [`examples/mandelbrot`](./examples/mandelbrot/README.md).
+
+Export it into its own lightweight repo before you run Revis so workspace clones contain only the demo, not the full Revis source tree.
+
+```bash
+/bin/sh ./examples/mandelbrot/export-demo.sh ~/mandelbrot-demo
+cd ~/mandelbrot-demo
+revis init
+revis spawn 4 --exec 'codex --yolo "Read program.md and begin the loop."'
+revis monitor
+```
+
+Claude example:
+
+```bash
+/bin/sh ./examples/mandelbrot/export-demo.sh ~/mandelbrot-demo
+cd ~/mandelbrot-demo
+revis init
+revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and begin the loop."'
+revis monitor
+```
+
 ## How it works
 
 Revis does 3 things:
