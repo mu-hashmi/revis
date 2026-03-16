@@ -8,7 +8,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 
 ---
 
-![Revis terminal demo](assets/revis-terminal.gif)
+![Revis terminal demo](https://raw.githubusercontent.com/mu-hashmi/revis/main/assets/revis-terminal.gif)
 
 ---
 
