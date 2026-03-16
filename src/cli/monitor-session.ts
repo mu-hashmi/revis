@@ -1,4 +1,9 @@
-/** Attach-aware monitor session loop. */
+/**
+ * Broken attach-aware monitor session loop.
+ *
+ * This implementation is intentionally retained for future repair, but the
+ * public `revis monitor` command is disabled and should not call into it.
+ */
 
 import React from "react";
 import { render } from "ink";

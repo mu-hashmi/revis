@@ -14,6 +14,28 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 
 Revis is **not** an orchestrator, framework, or harness. Revis has no opinions about how your agents work. It just makes sure they can see each other's work and build on it.
 
+## Demo
+
+The fastest way to see Revis in action is the Mandelbrot speedrun source under [`examples/mandelbrot`](./examples/mandelbrot/README.md).
+
+Export it into its own lightweight repo before you run Revis so workspace clones contain only the demo, not the full Revis source tree.
+
+```bash
+/bin/sh ./examples/mandelbrot/export-demo.sh ~/mandelbrot-demo
+cd ~/mandelbrot-demo
+revis init
+revis spawn 4 --exec 'codex --yolo "Read program.md and begin the loop."'
+```
+
+Claude example:
+
+```bash
+/bin/sh ./examples/mandelbrot/export-demo.sh ~/mandelbrot-demo
+cd ~/mandelbrot-demo
+revis init
+revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and begin the loop."'
+```
+
 ## How it works
 
 Revis does 3 things:
@@ -151,11 +173,10 @@ Use `revis spawn N` if you only want the workspaces and daemon. Use `--exec '<co
 
 Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a tmux session.
 
-### 3. Monitor and attach
+### 3. Inspect and attach
 
 - `revis status` prints a compact table with workspace state and attach commands.
-- `revis monitor` opens an Ink TUI with workspace activity and event streams.
-- `Enter` or `a` attaches, `j` and `k` move, `Tab` or `1` and `2` switch panes, `r` refreshes, and `q` quits.
+- Attach directly with the printed `tmux attach -t ...` command for the workspace you want to inspect.
 
 ---
 

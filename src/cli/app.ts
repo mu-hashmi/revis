@@ -19,7 +19,6 @@ import {
   stopWorkspaceBatch
 } from "../coordination/workspace-batch";
 import { formatStatusTable } from "./status-presenter";
-import { runMonitor } from "./monitor-session";
 
 export interface CliWriters {
   stderr?: (text: string) => void;
@@ -84,10 +83,14 @@ export function buildCli(io: CliWriters = {}): Command {
     }
   });
 
-  program.command("monitor").description("Open the live Ink monitor.").action(async () => {
-    const { root } = await loadCommandContext();
-    await runMonitor(root);
-  });
+  program
+    .command("monitor", { hidden: true })
+    .description("Broken internal monitor entrypoint.")
+    .action(async () => {
+      throw new RevisError(
+        "`revis monitor` is currently broken and disabled. Use `revis status` plus the printed tmux attach command instead."
+      );
+    });
 
   program
     .command("promote")
