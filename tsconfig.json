@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
+    "module": "preserve",
     "moduleResolution": "Bundler",
+    "moduleDetection": "force",
     "lib": [
       "ES2023",
       "DOM",
@@ -17,10 +18,20 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "noImplicitOverride": true,
+    "incremental": true,
+    "noEmit": true,
     "declaration": true,
+    "declarationMap": true,
     "sourceMap": true,
     "rootDir": ".",
     "outDir": "dist",
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ],
     "types": [
       "node",
       "vitest/globals"

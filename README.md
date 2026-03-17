@@ -1,8 +1,8 @@
-# revis — distributed + multiplexed autoresearch
+# revis — passive workspace coordination for coding agents
 
 **[Install](#install)** · **[Usage](#usage)** · **[How it works](#how-it-works)** · **[License](#license)**
 
-*Run parallel experiment loops across agents and machines with daemon-managed headless sessions.*
+*Run parallel agent workspaces with a structured daemon, live event stream, and operator-controlled promotion.*
 
 Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). This is the [next step](https://x.com/karpathy/status/2030705271627284816).
 
@@ -12,7 +12,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). T
 
 ---
 
-Revis is **not** an orchestrator, framework, or harness. Revis has no opinions about how your agents work. It just makes sure they can see each other's work and build on it.
+Revis is **not** an orchestrator, framework, or harness. It stays out of the agent loop and focuses on the coordination layer around it: isolated workspaces, restartable sessions, branch exchange, rebases, promotion, and operator visibility.
 
 ## Demo
 
@@ -41,16 +41,16 @@ revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and
 Revis does 3 things:
 
 1. It creates isolated local clones with stable coordination refs like `revis/alice/agent-3/work`.
-2. It runs a daemon that starts bounded headless sessions, pushes owned refs, fetches everyone else's `revis/*` refs, and rebases before the next iteration starts.
+2. It runs an Effect-native daemon that reconciles workspaces in parallel, pushes owned refs, fetches everyone else's `revis/*` refs, and rebases before the next iteration starts.
 3. It promotes one chosen workspace into managed trunk or into a pull request.
 
 The coordination loop looks like this:
 
 ```text
-┌───────────────────────┐   exit detected   ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
-│ workspace clone       │ ───────────────►  │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
-│ headless agent run    │ ◄──── restart ─── │ local runtime state  │ ── rebase sync ─► │ remote coordination refs│
-└───────────────────────┘                   └──────────────────────┘                   └─────────────────────────┘
+┌────────────────────────┐   exit detected   ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
+│ workspace repo         │ ───────────────►  │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
+│ detached agent session │ ◄──── restart ─── │ Effect runtime       │ ── rebase sync ─► │ remote coordination refs│
+└────────────────────────┘                   └──────────────────────┘                   └─────────────────────────┘
 ```
 
 The daemon baselines current local and remote heads on startup, so old history is not replayed. Each workspace then runs in iterations:
@@ -61,6 +61,8 @@ The daemon baselines current local and remote heads on startup, so old history i
 - fetches remote `revis/*/agent-*/work` refs
 - rebases the workspace onto the current sync target before the next iteration starts
 - blocks restart when the workspace is dirty or the rebase conflicts
+
+Workspace reconciliation runs in parallel fibers, so shutdown interrupts in-flight work cleanly instead of waiting for a hand-rolled queue to drain.
 
 For local `revis-local` coordination, that sync target is `revis/trunk`. For a real shared remote, it is the configured base branch.
 
@@ -98,16 +100,17 @@ Revis keeps its local runtime state under `.revis/`:
 .revis/
   config.json
   coordination.git/        # only in revis-local mode
-  sessions/
-    index.json
-    sess-1234abcd/
-      meta.json
-      events.jsonl
-  runtime/
+  state/
     daemon.json
-    events.jsonl           # symlink to the current live session log
     workspaces/
-    activity/
+      agent-1.json
+  journal/
+    live.jsonl
+  archive/
+    sessions/
+      sess-1234abcd/
+        meta.json
+        events.jsonl
   workspaces/
     agent-1/
       repo/
@@ -115,7 +118,7 @@ Revis keeps its local runtime state under `.revis/`:
       session.exit
 ```
 
-These files are local operator state. `revis init` adds the runtime, session archive, and workspace paths to `.gitignore`.
+The daemon appends every runtime event to the live journal and, when a live session exists, mirrors the same events into that session archive. `revis init` adds the state, journal, archive, and workspace paths to `.gitignore`.
 
 ---
 
@@ -153,6 +156,7 @@ npm link
 - Node 20+
 - `git`
 - `gh` on your `PATH` if you want PR-based promotion against a GitHub remote
+- Daytona credentials if you switch `.revis/config.json` to `"sandboxProvider": "daytona"`
 
 ---
 
@@ -176,11 +180,19 @@ revis spawn 4 --exec 'codex --yolo'
 
 Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a headless workspace loop.
 
-### 3. Inspect and attach
+### 3. Inspect the runtime
 
 - `revis dashboard` launches the local timeline dashboard in your browser.
 - `revis status` prints a compact table with workspace state.
+- `revis status --watch` redraws status whenever new runtime events arrive.
+- `revis events` tails the live event stream with backlog replay.
 - Inspect live output with `tail -f .revis/workspaces/agent-1/session.log`.
+
+### 4. Stop and promote
+
+- `revis stop agent-2` stops one workspace.
+- `revis stop --all` stops every workspace and the daemon.
+- `revis promote agent-2` promotes one workspace into trunk or a GitHub pull request, depending on the configured remote.
 
 ---
 

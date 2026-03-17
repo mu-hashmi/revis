@@ -9,7 +9,7 @@ import React, {
   useState
 } from "react";
 
-import type { RuntimeEvent, SessionMeta, SessionSummary } from "../core/models";
+import type { RuntimeEvent, SessionMeta, SessionSummary } from "../domain/models";
 import {
   fetchCommitDetail,
   fetchSessionEvents,
@@ -129,7 +129,7 @@ export function DashboardApp(): React.JSX.Element {
     selectedEventKey,
     hoveredEventKey
   );
-  const selectedCommitSha = timeline.activeEvent?.event.sha;
+  const selectedCommitSha = timeline.activeEvent ? eventSha(timeline.activeEvent.event) : undefined;
   const { commitDetails, commitErrors } = useCommitLookup(selectedCommitSha);
 
   // Keep the right edge pinned when live data extends the visible duration.
@@ -304,7 +304,9 @@ export function DashboardApp(): React.JSX.Element {
                 <div className="detail-meta">
                   {timeline.activeEvent.agentId ? <span>{timeline.activeEvent.agentId}</span> : null}
                   <span>{formatClock(timeline.activeEvent.event.timestamp)}</span>
-                  {timeline.activeEvent.event.sha ? <span>{timeline.activeEvent.event.sha.slice(0, 8)}</span> : null}
+                  {eventSha(timeline.activeEvent.event) ? (
+                    <span>{eventSha(timeline.activeEvent.event)!.slice(0, 8)}</span>
+                  ) : null}
                 </div>
                 {selectedCommitSha ? (
                   commitDetails[selectedCommitSha] ? (
@@ -314,15 +316,15 @@ export function DashboardApp(): React.JSX.Element {
                   ) : (
                     <div className="detail-loading">Loading commit detail…</div>
                   )
-                ) : timeline.activeEvent.event.metadata ? (
-                  <pre className="detail-pre">{JSON.stringify(timeline.activeEvent.event.metadata, null, 2)}</pre>
+                ) : eventMetadata(timeline.activeEvent.event) ? (
+                  <pre className="detail-pre">{JSON.stringify(eventMetadata(timeline.activeEvent.event), null, 2)}</pre>
                 ) : null}
               </div>
             ) : (
               <div className="recent-list">
                 {events.slice(-8).reverse().map((event, index) => (
                   <button
-                    key={`${index}:${event.timestamp}:${event.type}`}
+                    key={`${index}:${event.timestamp}:${event._tag}`}
                     className="recent-row"
                     onClick={() => {
                       const match = timeline.normalizedEvents.find((candidate) => candidate.event === event);
@@ -447,7 +449,7 @@ export function DashboardApp(): React.JSX.Element {
                                 <strong>{title}</strong>
                                 <span>
                                   {formatClock(event.event.timestamp)}
-                                  {event.event.sha ? ` · ${event.event.sha.slice(0, 8)}` : ""}
+                                  {eventSha(event.event) ? ` · ${eventSha(event.event)!.slice(0, 8)}` : ""}
                                 </span>
                               </span>
                             </button>
@@ -580,7 +582,7 @@ function useDashboardData(): DashboardDataState {
       return;
     }
 
-    const source = new EventSource("/events/stream");
+    const source = new EventSource("/api/events/stream");
     source.onmessage = (message) => {
       handleSseMessage(message.data);
     };
@@ -668,7 +670,7 @@ function useTimelineModel(
 
     return events.map((event, index) => ({
       event,
-      key: `${index}:${event.timestamp}:${event.type}:${event.agentId ?? "system"}:${event.sha ?? "na"}`,
+      key: `${index}:${event.timestamp}:${event._tag}:${timelineAgentId(event) ?? "system"}:${eventSha(event) ?? "na"}`,
       kind: eventKind(event),
       agentId: timelineAgentId(event),
       minutes: minutesSince(sessionMeta.startedAt, event.timestamp)
@@ -772,14 +774,14 @@ function toggleSetValue<T extends string>(
 
 /** Return the timeline kind used by the dashboard filters and nodes. */
 function eventKind(event: RuntimeEvent): TimelineKind {
-  if (event.type === "branch_pushed" || event.type === "promoted") {
+  if (event._tag === "BranchPublished" || event._tag === "Promoted") {
     return "commit";
   }
 
   if (
-    event.type === "iteration_started" ||
-    event.type === "iteration_exited" ||
-    event.type === "workspace_restarted"
+    event._tag === "IterationStarted" ||
+    event._tag === "IterationExited" ||
+    event._tag === "WorkspaceRestarted"
   ) {
     return "iteration";
   }
@@ -789,7 +791,23 @@ function eventKind(event: RuntimeEvent): TimelineKind {
 
 /** Return the lane agent id for one event when it belongs on a swim lane. */
 function timelineAgentId(event: RuntimeEvent): string | null {
-  return event.agentId ?? null;
+  return "agentId" in event ? event.agentId : null;
+}
+
+/** Return the commit SHA attached to one event, when present. */
+function eventSha(event: RuntimeEvent): string | undefined {
+  return "sha" in event ? event.sha : undefined;
+}
+
+/** Return the non-standard detail fields for one event, when present. */
+function eventMetadata(event: RuntimeEvent): Record<string, unknown> | null {
+  const { timestamp: _timestamp, summary: _summary, _tag: _tag, ...rest } = event as RuntimeEvent &
+    Record<string, unknown>;
+
+  delete rest.agentId;
+  delete rest.branch;
+
+  return Object.keys(rest).length > 0 ? rest : null;
 }
 
 /** Return the session duration in minutes from metadata plus event bounds. */

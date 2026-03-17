@@ -1,0 +1,133 @@
+/** Shared JSON and JSONL persistence helpers for Effect Platform file storage. */
+
+import type * as PlatformFileSystem from "@effect/platform/FileSystem";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+import { StorageError, storageError } from "../domain/errors";
+
+export function ensureDirectory(
+  fs: PlatformFileSystem.FileSystem,
+  path: string
+): Effect.Effect<void, StorageError> {
+  return fs.makeDirectory(path, { recursive: true }).pipe(
+    Effect.mapError((error) => storageError(path, error.message))
+  );
+}
+
+export function removeFile(
+  fs: PlatformFileSystem.FileSystem,
+  path: string
+): Effect.Effect<void, StorageError> {
+  return fs.remove(path, { force: true }).pipe(
+    Effect.mapError((error) => storageError(path, error.message))
+  );
+}
+
+export function readJsonFile<A, I>(
+  fs: PlatformFileSystem.FileSystem,
+  path: string,
+  schema: Schema.Schema<A, I>
+): Effect.Effect<A, StorageError> {
+  return fs.readFileString(path).pipe(
+    Effect.mapError((error) => storageError(path, error.message)),
+    Effect.flatMap((payload) =>
+      Schema.decodeUnknown(Schema.parseJson(schema))(payload).pipe(
+        Effect.mapError((error) => storageError(path, String(error)))
+      )
+    )
+  );
+}
+
+export function readJsonFileOrNull<A, I>(
+  fs: PlatformFileSystem.FileSystem,
+  path: string,
+  schema: Schema.Schema<A, I>
+): Effect.Effect<A | null, StorageError> {
+  return fs.readFileString(path).pipe(
+    Effect.catchTag("SystemError", (error) =>
+      error.reason === "NotFound" ? Effect.succeed<string | null>(null) : Effect.fail(error)
+    ),
+    Effect.mapError((error) => storageError(path, error.message)),
+    Effect.flatMap((payload) =>
+      payload === null
+        ? Effect.succeed(null)
+        : Schema.decodeUnknown(Schema.parseJson(schema))(payload).pipe(
+            Effect.mapError((error) => storageError(path, String(error)))
+          )
+    )
+  );
+}
+
+export function writeJsonFile<A, I>(
+  fs: PlatformFileSystem.FileSystem,
+  path: string,
+  schema: Schema.Schema<A, I>,
+  payload: A
+): Effect.Effect<void, StorageError> {
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+
+  return Effect.gen(function* () {
+    const encoded = yield* Schema.encode(Schema.parseJson(schema))(payload).pipe(
+      Effect.mapError((error) => storageError(path, String(error)))
+    );
+
+    yield* fs.writeFileString(tempPath, `${encoded}\n`).pipe(
+      Effect.mapError((error) => storageError(tempPath, error.message))
+    );
+
+    yield* fs.rename(tempPath, path).pipe(
+      Effect.mapError((error) => storageError(path, error.message))
+    );
+  });
+}
+
+export function readJsonLines<A, I>(
+  fs: PlatformFileSystem.FileSystem,
+  path: string,
+  schema: Schema.Schema<A, I>,
+  limit?: number
+): Effect.Effect<ReadonlyArray<A>, StorageError> {
+  return fs.readFileString(path).pipe(
+    Effect.catchTag("SystemError", (error) =>
+      error.reason === "NotFound" ? Effect.succeed("") : Effect.fail(error)
+    ),
+    Effect.catchTag("BadArgument", (error) =>
+      Effect.fail(storageError(path, error.message))
+    ),
+    Effect.mapError((error) => storageError(path, error.message)),
+    Effect.flatMap((payload) =>
+      Effect.forEach(
+        payload
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean),
+        (line) =>
+          Schema.decodeUnknown(Schema.parseJson(schema))(line).pipe(
+            Effect.mapError((error) => storageError(path, String(error)))
+          ),
+        { concurrency: "unbounded" }
+      )
+    ),
+    Effect.map((entries) =>
+      limit === undefined || limit <= 0 ? entries : entries.slice(-limit)
+    )
+  );
+}
+
+export function appendJsonLine<A, I>(
+  fs: PlatformFileSystem.FileSystem,
+  path: string,
+  schema: Schema.Schema<A, I>,
+  payload: A
+): Effect.Effect<void, StorageError> {
+  return Effect.gen(function* () {
+    const encoded = yield* Schema.encode(Schema.parseJson(schema))(payload).pipe(
+      Effect.mapError((error) => storageError(path, String(error)))
+    );
+
+    yield* fs.writeFileString(path, `${encoded}\n`, { flag: "a" }).pipe(
+      Effect.mapError((error) => storageError(path, error.message))
+    );
+  });
+}
