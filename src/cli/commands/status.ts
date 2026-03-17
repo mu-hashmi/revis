@@ -21,6 +21,7 @@ export function makeStatusCommand(io: CliWriters) {
     yield* writeLine(writeOut, formatStatusSnapshot(snapshot).trimEnd());
   });
 
+  /** Poll the daemon API and redraw the full status screen on each tick. */
   const watchStatus = () => Effect.gen(function* () {
     const daemon = yield* DaemonControl;
     const state = yield* daemon.ensureRunning;
@@ -30,6 +31,7 @@ export function makeStatusCommand(io: CliWriters) {
         const snapshot = yield* fetchJson<StatusSnapshot>(`${state.apiBaseUrl}/api/status`);
 
         yield* Effect.sync(() => {
+          // Full redraw keeps watch mode simple because the rendered block changes height often.
           writeOut("\u001bc");
         });
         yield* writeLine(writeOut, formatStatusSnapshot(snapshot).trimEnd());

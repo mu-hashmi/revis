@@ -12,20 +12,24 @@ export class RevisError extends Error {
   }
 }
 
+/** Configuration file load/save failure. */
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   path: Schema.NonEmptyString,
   message: Schema.String
 }) {}
 
+/** Operator-facing validation failure caused by invalid input or state. */
 export class ValidationError extends Schema.TaggedError<ValidationError>()("ValidationError", {
   message: Schema.String
 }) {}
 
+/** Command execution failure with the rendered command line attached. */
 export class CommandError extends Schema.TaggedError<CommandError>()("CommandError", {
   command: Schema.String,
   message: Schema.String
 }) {}
 
+/** Git command failure classified as transient and worth retrying later. */
 export class GitTransientError extends Schema.TaggedError<GitTransientError>()(
   "GitTransientError",
   {
@@ -34,17 +38,20 @@ export class GitTransientError extends Schema.TaggedError<GitTransientError>()(
   }
 ) {}
 
+/** Persistent filesystem/storage failure rooted at one project path. */
 export class StorageError extends Schema.TaggedError<StorageError>()("StorageError", {
   path: Schema.NonEmptyString,
   message: Schema.String
 }) {}
 
+/** Provider-specific runtime failure for local or Daytona workspaces. */
 export class ProviderError extends Schema.TaggedError<ProviderError>()("ProviderError", {
   provider: Schema.Literal("local", "daytona"),
   action: Schema.NonEmptyString,
   message: Schema.String
 }) {}
 
+/** Rebase refusal because the workspace has local changes that must be resolved first. */
 export class RebaseBlockedError extends Schema.TaggedError<RebaseBlockedError>()(
   "RebaseBlockedError",
   {
@@ -53,6 +60,7 @@ export class RebaseBlockedError extends Schema.TaggedError<RebaseBlockedError>()
   }
 ) {}
 
+/** Rebase failure caused by an actual merge conflict. */
 export class RebaseConflictError extends Schema.TaggedError<RebaseConflictError>()(
   "RebaseConflictError",
   {
@@ -62,6 +70,7 @@ export class RebaseConflictError extends Schema.TaggedError<RebaseConflictError>
   }
 ) {}
 
+/** Daemon reachability failure surfaced to CLI callers. */
 export class DaemonUnavailableError extends Schema.TaggedError<DaemonUnavailableError>()(
   "DaemonUnavailableError",
   {
@@ -80,6 +89,7 @@ export type RevisDomainError =
   | StorageError
   | ValidationError;
 
+/** Build one provider-tagged error value. */
 export function providerError(
   provider: SandboxProvider,
   action: string,
@@ -88,14 +98,17 @@ export function providerError(
   return ProviderError.make({ provider, action, message });
 }
 
+/** Build one storage error rooted at the provided path. */
 export function storageError(path: string, message: string): StorageError {
   return StorageError.make({ path, message });
 }
 
+/** Build one operator-facing validation error. */
 export function validationError(message: string): ValidationError {
   return ValidationError.make({ message });
 }
 
+/** Render any known domain error into operator-facing text at the outer boundary. */
 export function formatDomainError(error: RevisDomainError | unknown): string {
   if (error instanceof RevisError) {
     return error.message;

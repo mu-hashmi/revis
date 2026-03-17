@@ -23,6 +23,7 @@ export function makeStopCommand(io: CliWriters) {
           const daemon = yield* DaemonControl;
 
           if (all) {
+            // The daemon treats an empty target list as "stop every tracked workspace."
             yield* daemon.stopWorkspaces([]);
             yield* daemon.shutdown;
             yield* writeLine(writeOut, "Stopped all workspaces and the daemon");

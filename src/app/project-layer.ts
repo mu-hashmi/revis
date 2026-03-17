@@ -53,6 +53,7 @@ export function projectLayer(root: string): Layer.Layer<
   const configLayer = projectConfigLayer.pipe(Layer.provide(pathsLayer));
   const storeLayer = workspaceStoreLayer.pipe(Layer.provide(pathsLayer));
   const journalLayer = eventJournalLayer.pipe(Layer.provide(pathsLayer));
+
   const foundationLayer = Layer.mergeAll(
     pathsLayer,
     hostGitLayer,
@@ -60,13 +61,17 @@ export function projectLayer(root: string): Layer.Layer<
     storeLayer,
     journalLayer
   );
+
   const providerLayer = Layer.unwrapEffect(
+    // Commands choose their provider from persisted project config, so provider wiring has to
+    // happen after the project-level services are already available.
     ProjectConfig.pipe(
       Effect.flatMap((service) => service.load),
       Effect.map((config) => workspaceProviderLayer(config.sandboxProvider)),
       Effect.provide(foundationLayer)
     )
   ).pipe(Layer.provide(foundationLayer));
+
   const promotionLayer = promotionServiceLayer.pipe(
     Layer.provide(Layer.merge(foundationLayer, providerLayer))
   );
@@ -79,6 +84,7 @@ export function projectLayer(root: string): Layer.Layer<
 export function resolveProjectRoot(cwd: string): Effect.Effect<string, HostGitError, HostGit> {
   return Effect.gen(function* () {
     const hostGit = yield* HostGit;
+
     return yield* hostGit.resolveRepoRoot(cwd);
   });
 }

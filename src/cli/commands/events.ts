@@ -17,12 +17,14 @@ export function makeEventsCommand(io: CliWriters) {
   const limit = Options.integer("limit").pipe(Options.withDefault(20));
   const follow = Options.boolean("follow").pipe(Options.withDefault(true));
 
+  /** Stream daemon SSE events to stdout until the connection closes. */
   const followEvents = () => Effect.gen(function* () {
     const daemon = yield* DaemonControl;
     const state = yield* daemon.ensureRunning;
 
     yield* Effect.tryPromise({
       try: async () => {
+        // Connect to the daemon-owned event stream.
         const response = await fetch(`${state.apiBaseUrl}/api/events/stream`, {
           cache: "no-store"
         });
@@ -35,6 +37,7 @@ export function makeEventsCommand(io: CliWriters) {
         let buffer = "";
 
         while (true) {
+          // Buffer fetch chunks until a full SSE frame is available.
           const { done, value } = await reader.read();
           if (done) {
             break;
@@ -43,6 +46,7 @@ export function makeEventsCommand(io: CliWriters) {
           buffer += decoder.decode(value, { stream: true });
 
           while (true) {
+            // SSE frames are delimited by a blank line, and fetch chunk boundaries are arbitrary.
             const marker = buffer.indexOf("\n\n");
             if (marker === -1) {
               break;
@@ -51,6 +55,7 @@ export function makeEventsCommand(io: CliWriters) {
             const frame = buffer.slice(0, marker);
             buffer = buffer.slice(marker + 2);
 
+            // Parse each data line into the runtime event payload the CLI renders.
             for (const line of frame.split("\n")) {
               if (!line.startsWith("data: ")) {
                 continue;
@@ -76,6 +81,7 @@ export function makeEventsCommand(io: CliWriters) {
           follow
             ? followEvents()
             : Effect.gen(function* () {
+                // Load the persisted backlog directly when watch mode is disabled.
                 const journal = yield* EventJournal;
                 const events = yield* journal.loadEvents(limit);
 

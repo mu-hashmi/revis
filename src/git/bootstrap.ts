@@ -39,6 +39,8 @@ export function bootstrapManagedTrunkRemote(
 
     yield* Effect.scoped(
       Effect.gen(function* () {
+        // Seed an empty managed trunk via a temporary repo because git cannot push a branch that
+        // has no commits at all from the host repository.
         const tempRoot = yield* fs.makeTempDirectoryScoped({
           prefix: "revis-seed-trunk-"
         }).pipe(

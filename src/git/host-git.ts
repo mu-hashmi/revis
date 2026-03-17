@@ -121,15 +121,19 @@ export interface HostGitApi {
   readonly showCommit: (root: string, sha: string) => Effect.Effect<string, HostGitError>;
 }
 
+/** Host-side git capability used by setup, daemon reconcile, and promotion flows. */
 export class HostGit extends Context.Tag("@revis/HostGit")<HostGit, HostGitApi>() {}
 
+/** Build the live host git service on top of Effect Platform command and filesystem services. */
 const makeHostGit = Effect.gen(function* () {
+  // Shared platform services and command runner.
   const executor = yield* CommandExecutor.CommandExecutor;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* PlatformPath.Path;
   const run = (argv: string[], options: Parameters<typeof runCommandWith>[2] = {}) =>
     runCommandWith(executor, argv, options);
 
+  // Repository discovery and coordination remote selection.
   const resolveRepoRoot = Effect.fn("HostGit.resolveRepoRoot")(function* (cwd: string) {
     const result = yield* run(["git", "rev-parse", "--show-toplevel"], {
       cwd,
@@ -226,6 +230,7 @@ const makeHostGit = Effect.gen(function* () {
       .map((line) => line.trim())
       .filter(Boolean);
 
+    // Prefer origin, then the only configured remote, and only then create a repo-local remote.
     if (remotes.includes("origin")) {
       return "origin";
     }
@@ -242,6 +247,7 @@ const makeHostGit = Effect.gen(function* () {
     });
   });
 
+  // Remote bootstrapping and fetch helpers.
   const ensureCoordinationRemote = Effect.fn("HostGit.ensureCoordinationRemote")(function* (root: string) {
     const target = path.join(root, ".revis", "coordination.git");
     const exists = yield* fs.exists(target).pipe(
@@ -325,11 +331,12 @@ const makeHostGit = Effect.gen(function* () {
     const exists = yield* remoteBranchExists(root, remoteName, trunkBaseBranch);
     if (!exists) {
       return yield* ValidationError.make({
-        message: `Remote branch ${remoteName}/${trunkBaseBranch} does not exist. Push ${trunkBaseBranch} before using Revis.`
+      message: `Remote branch ${remoteName}/${trunkBaseBranch} does not exist. Push ${trunkBaseBranch} before using Revis.`
       });
     }
   });
 
+  // Workspace clone/setup helpers and common ref inspection utilities.
   const fetchCoordinationRefs = Effect.fn("HostGit.fetchCoordinationRefs")(function* (
     root: string,
     remoteName: string,
@@ -462,6 +469,8 @@ const makeHostGit = Effect.gen(function* () {
       return asOperatorSlug(emailSlug);
     }
 
+    // Prefer email because it is usually unique and stable across machines; fall back to git
+    // user.name only when email is missing or unusable.
     const nameResult = yield* run(["git", "config", "user.name"], {
       cwd: root,
       check: false
@@ -477,6 +486,7 @@ const makeHostGit = Effect.gen(function* () {
     });
   });
 
+  // Remote branch summaries, promotion helpers, and raw commit inspection.
   const listRemoteWorkspaceHeads = Effect.fn("HostGit.listRemoteWorkspaceHeads")(function* (
     root: string,
     remoteName: string

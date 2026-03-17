@@ -81,6 +81,7 @@ export function processAlive(pid: number): boolean {
       return false;
     }
     if (code === "EPERM") {
+      // EPERM still means the process exists; this probe only cares about liveness.
       return true;
     }
 

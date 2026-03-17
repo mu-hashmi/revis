@@ -129,6 +129,8 @@ export function pushWorkspaceHead(
     .runInWorkspace(snapshot, [
       "git",
       "push",
+      // Coordination refs are daemon-owned mirrors of the workspace HEAD, not shared human
+      // branches, so a force push is the correct publication policy here.
       "--force",
       "-u",
       remoteName,
@@ -163,6 +165,7 @@ export function rebaseWorkspaceOntoSyncTarget(
     const detail = result.stderr.trim() || result.stdout.trim() || "rebase failed";
     const abort = yield* provider
       .runInWorkspace(snapshot, ["git", "rebase", "--abort"], { check: false })
+      // Rebase cleanup is best-effort; preserve both failures if abort itself also breaks.
       .pipe(Effect.orElseSucceed(() => ({ stdout: "", stderr: "", exitCode: 1 })));
 
     return yield* RebaseConflictError.make({

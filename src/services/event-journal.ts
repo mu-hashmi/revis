@@ -53,6 +53,7 @@ export interface EventJournalApi {
   ) => Effect.Effect<ReadonlyArray<RuntimeEvent>, StorageError>;
 }
 
+/** Append-only event log plus archive/session projections for daemon and UI consumers. */
 export class EventJournal extends Context.Tag("@revis/EventJournal")<
   EventJournal,
   EventJournalApi
@@ -64,10 +65,12 @@ export const eventJournalLayer = Layer.scoped(
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* ProjectPaths;
 
+    // Prepare the on-disk journal and archive layout.
     yield* ensureDirectory(fs, paths.journalDir);
     yield* ensureDirectory(fs, paths.archiveDir);
     yield* ensureDirectory(fs, paths.sessionsDir);
 
+    // Recover persisted archive metadata into in-memory refs for fast access.
     const summaries = yield* loadSessionSummaries(fs, paths);
     const currentSession = yield* recoverCurrentSession(fs, paths, summaries);
     const summariesRef = yield* Ref.make(
@@ -79,6 +82,7 @@ export const eventJournalLayer = Layer.scoped(
       (events) => PubSub.shutdown(events)
     );
 
+    /** Ensure the current daemon lifetime has one writable archive session. */
     const ensureActiveSession = (options: {
       coordinationRemote: string;
       trunkBase: string;
@@ -130,6 +134,7 @@ export const eventJournalLayer = Layer.scoped(
         return session;
       });
 
+    /** Refresh the active session participant list from the current workspace snapshots. */
     const syncParticipants = (snapshots: ReadonlyArray<WorkspaceSnapshot>) =>
       Effect.gen(function* () {
         const current = yield* Ref.get(currentSessionRef);
@@ -207,6 +212,7 @@ export const eventJournalLayer = Layer.scoped(
         return next;
       });
 
+    /** Mark the active session as ended and persist the final session summary view. */
     const closeActiveSession = Effect.gen(function* () {
       const current = yield* Ref.get(currentSessionRef);
       if (!current) {
@@ -239,6 +245,7 @@ export const eventJournalLayer = Layer.scoped(
       return ended;
     });
 
+    /** Append one runtime event to the live log, active archive, and in-process stream. */
     const append = (event: RuntimeEvent) =>
       Effect.gen(function* () {
         yield* appendJsonLine(fs, paths.liveJournalFile, RuntimeEventSchema, event);
@@ -251,6 +258,7 @@ export const eventJournalLayer = Layer.scoped(
         yield* PubSub.publish(pubsub, event);
       });
 
+    // Expose the journal API on top of the recovered refs and pubsub stream.
     return EventJournal.of({
       ensureActiveSession,
       syncParticipants,
@@ -267,6 +275,7 @@ export const eventJournalLayer = Layer.scoped(
   })
 );
 
+/** Load archived session summaries from disk for dashboard and daemon startup. */
 function loadSessionSummaries(
   fs: FileSystem.FileSystem,
   paths: ProjectPathsApi
@@ -307,6 +316,7 @@ function loadSessionSummaries(
   );
 }
 
+/** Recover the one session that should continue receiving events after a daemon restart. */
 function recoverCurrentSession(
   fs: FileSystem.FileSystem,
   paths: ProjectPathsApi,
@@ -321,6 +331,8 @@ function recoverCurrentSession(
       return null;
     }
 
+    // If multiple live sessions survived a crash, prefer the newest one rather than guessing
+    // how to merge overlapping archives.
     return yield* readJsonFile(fs, paths.sessionMetaFile(liveSummaries[0]!.id), SessionMeta);
   });
 }

@@ -25,6 +25,7 @@ export async function fetchSessionEvents(sessionId: string): Promise<RuntimeEven
     cache: "no-store"
   });
   if (response.status === 404) {
+    // A session can exist before any archived events have been written, so treat that as empty.
     return [];
   }
 

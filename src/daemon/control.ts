@@ -67,6 +67,7 @@ export interface DaemonControlApi {
   readonly shutdown: Effect.Effect<void, DaemonControlError>;
 }
 
+/** Operator-facing control surface for starting and steering the daemon process. */
 export class DaemonControl extends Context.Tag("@revis/DaemonControl")<
   DaemonControl,
   DaemonControlApi
@@ -157,6 +158,7 @@ export function runDaemonProcess(root: string) {
 /** Run the live daemon supervisor and HTTP API inside one scoped runtime. */
 export const daemonServerProgram = Effect.scoped(
   Effect.gen(function* () {
+    // Load the project-scoped services and static daemon configuration.
     const configService = yield* ProjectConfig;
     const config = yield* configService.load;
     const eventJournal = yield* EventJournal;
@@ -170,6 +172,7 @@ export const daemonServerProgram = Effect.scoped(
     const reconcileQueue = yield* Queue.unbounded<ReconcileReason>();
     const server = yield* makeDaemonServer();
 
+    // Bind the API server and derive the persisted daemon snapshot from the bound address.
     if (server.address._tag !== "TcpAddress") {
       return yield* Effect.dieMessage("Daemon server did not bind a TCP address");
     }
@@ -203,6 +206,7 @@ export const daemonServerProgram = Effect.scoped(
       syncBranch
     });
 
+    // Build the transport router after the runtime control callbacks exist.
     const router = daemonRouter({
       dashboardRoot: paths.dashboardRoot,
       onReconcile: (reason) =>
@@ -219,10 +223,11 @@ export const daemonServerProgram = Effect.scoped(
         ).pipe(
           Effect.zipRight(Deferred.succeed(shutdown, undefined)),
           Effect.asVoid
-        ),
+      ),
       onStop: supervisors.stopWorkspaces
     });
 
+    // Persist daemon liveness and recover the active archive session before serving requests.
     yield* store.setDaemonState(daemonState);
     yield* eventJournal.ensureActiveSession({
       coordinationRemote: config.coordinationRemote,
@@ -237,6 +242,7 @@ export const daemonServerProgram = Effect.scoped(
     );
     yield* syncParticipants(eventJournal, store);
 
+    // Start background fibers for HTTP serving, periodic polls, and queued reconciles.
     yield* Effect.forkScoped(server.serve(router));
     yield* Effect.forkScoped(
       Effect.forever(
@@ -252,11 +258,13 @@ export const daemonServerProgram = Effect.scoped(
     );
 
     if (process.env.REVIS_DAEMON_READY_STDOUT === "1") {
+      // The parent CLI waits for this sentinel so it does not race the daemon startup path.
       yield* Effect.sync(() => {
         process.stdout.write(`${DAEMON_READY_LINE}\n`);
       });
     }
 
+    // Kick the initial reconcile, then stay alive until an explicit shutdown request arrives.
     yield* Queue.offer(reconcileQueue, "startup");
     yield* Deferred.await(shutdown);
   }).pipe(
@@ -272,6 +280,7 @@ export const daemonServerProgram = Effect.scoped(
   )
 );
 
+/** Mirror the current workspace registry into the active session participant list. */
 function syncParticipants(
   eventJournal: EventJournalApi,
   store: WorkspaceStoreApi

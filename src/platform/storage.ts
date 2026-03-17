@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 
 import { StorageError, storageError } from "../domain/errors";
 
+/** Create one directory tree and surface filesystem failures as `StorageError`. */
 export function ensureDirectory(
   fs: PlatformFileSystem.FileSystem,
   path: string
@@ -15,6 +16,7 @@ export function ensureDirectory(
   );
 }
 
+/** Remove one file path without failing when it is already absent. */
 export function removeFile(
   fs: PlatformFileSystem.FileSystem,
   path: string
@@ -24,6 +26,7 @@ export function removeFile(
   );
 }
 
+/** Read and decode one JSON file through the provided schema. */
 export function readJsonFile<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,
@@ -39,6 +42,7 @@ export function readJsonFile<A, I>(
   );
 }
 
+/** Read one JSON file when present, or return `null` for a missing file. */
 export function readJsonFileOrNull<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,
@@ -54,11 +58,12 @@ export function readJsonFileOrNull<A, I>(
         ? Effect.succeed(null)
         : Schema.decodeUnknown(Schema.parseJson(schema))(payload).pipe(
             Effect.mapError((error) => storageError(path, String(error)))
-          )
+      )
     )
   );
 }
 
+/** Encode and atomically replace one JSON file. */
 export function writeJsonFile<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,
@@ -72,6 +77,7 @@ export function writeJsonFile<A, I>(
       Effect.mapError((error) => storageError(path, String(error)))
     );
 
+    // Write to a temp file first so readers never observe a truncated JSON document.
     yield* fs.writeFileString(tempPath, `${encoded}\n`).pipe(
       Effect.mapError((error) => storageError(tempPath, error.message))
     );
@@ -82,6 +88,7 @@ export function writeJsonFile<A, I>(
   });
 }
 
+/** Read, decode, and optionally tail-limit a JSONL file. */
 export function readJsonLines<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,
@@ -115,6 +122,7 @@ export function readJsonLines<A, I>(
   );
 }
 
+/** Append one schema-encoded entry to a JSONL file. */
 export function appendJsonLine<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,

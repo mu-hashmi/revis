@@ -29,6 +29,8 @@ export function promoteManagedWorkspace(
 
     return yield* Effect.scoped(
       Effect.gen(function* () {
+        // Promote through a temporary clone so merge state never dirties the operator checkout or
+        // the workspace sandbox that is being promoted.
         const tempRoot = yield* fs.makeTempDirectoryScoped({
           prefix: "revis-promote-"
         }).pipe(

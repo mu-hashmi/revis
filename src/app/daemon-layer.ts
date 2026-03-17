@@ -32,6 +32,7 @@ export function daemonLayer(root: string): Layer.Layer<
   const configLayer = projectConfigLayer.pipe(Layer.provide(pathsLayer));
   const storeLayer = workspaceStoreLayer.pipe(Layer.provide(pathsLayer));
   const journalLayer = eventJournalLayer.pipe(Layer.provide(pathsLayer));
+
   const foundationLayer = Layer.mergeAll(
     pathsLayer,
     hostGitLayer,
@@ -39,7 +40,10 @@ export function daemonLayer(root: string): Layer.Layer<
     storeLayer,
     journalLayer
   );
+
   const providerLayer = Layer.unwrapEffect(
+    // Provider selection depends on persisted project config, so load config inside the
+    // already-assembled foundation layer instead of duplicating that lookup at each caller.
     ProjectConfig.pipe(
       Effect.flatMap((service) => service.load),
       Effect.map((config) => workspaceProviderLayer(config.sandboxProvider)),

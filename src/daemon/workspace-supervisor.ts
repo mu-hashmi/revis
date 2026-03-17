@@ -68,6 +68,7 @@ export function makeWorkspaceSupervisors(
 
     const persistSnapshot = (snapshot: WorkspaceSnapshot) => options.store.upsert(snapshot);
 
+    /** Persist a provider failure state so operators can see the last failed reconcile. */
     const markProviderFailure = (snapshot: WorkspaceSnapshot, error: unknown) =>
       persistSnapshot(
         withState(
@@ -79,17 +80,20 @@ export function makeWorkspaceSupervisors(
         )
       );
 
+    /** Reconcile one workspace against the latest sync target and provider session state. */
     const reconcileWorkspace = (
       initial: WorkspaceSnapshot,
       signal: WorkspaceSignal
     ): Effect.Effect<void, unknown> =>
       Effect.gen(function* () {
+        // Persist the latest observed remote target before any other transitions.
         let snapshot = withTracking(initial, {
           lastSeenRemoteSha: signal.syncTargetSha
         });
 
         yield* persistSnapshot(snapshot);
 
+        // Inspect the current provider session and refresh cached workspace HEAD metadata.
         const inspected = yield* options.provider.inspectSession(snapshot);
         const headSha = yield* workspaceHeadSha(options.provider, snapshot);
 
@@ -98,6 +102,7 @@ export function makeWorkspaceSupervisors(
           yield* persistSnapshot(snapshot);
         }
 
+        // Publish newly created local commits back to the stable coordination branch.
         if (snapshot.state.lastPushedSha !== headSha) {
           const pushedSha = yield* pushWorkspaceHead(
             options.provider,
@@ -121,6 +126,7 @@ export function makeWorkspaceSupervisors(
           );
         }
 
+        // Refresh remote refs and decide whether the workspace needs to rebase.
         yield* fetchWorkspaceCoordinationRefs(
           options.provider,
           snapshot,
@@ -154,6 +160,8 @@ export function makeWorkspaceSupervisors(
           }
 
           if (inspected.phase === "running") {
+            // Rebase only from a stopped checkout so agent work and git history are never
+            // mutated concurrently inside the same workspace.
             yield* options.provider.interruptIteration(snapshot);
             yield* persistSnapshot(
               withState(snapshot, RestartPendingState.make(trackingFields(snapshot)))
@@ -216,6 +224,7 @@ export function makeWorkspaceSupervisors(
           );
         }
 
+        // Restart the workspace whenever the current iteration has ended or a rebase completed.
         if (inspected.phase === "running") {
           return;
         }
@@ -278,6 +287,7 @@ export function makeWorkspaceSupervisors(
         );
       });
 
+    /** Consume queued reconcile signals for one workspace until the daemon stops. */
     const workspaceSupervisor = (
       agentId: string,
       queue: Queue.Queue<WorkspaceSignal>
@@ -290,6 +300,8 @@ export function makeWorkspaceSupervisors(
                 snapshot
                   ? reconcileWorkspace(snapshot, signal).pipe(
                       Effect.catchAll((error) =>
+                        // Persist the failure for operator visibility, then keep the supervisor
+                        // alive so later reconcile signals can recover the workspace.
                         options.store.get(agentId).pipe(
                           Effect.flatMap((current) =>
                             current
@@ -314,6 +326,8 @@ export function makeWorkspaceSupervisors(
           return existing;
         }
 
+        // Only the latest remote target matters while a workspace is already reconciling, so
+        // coalesce bursts of signals into a single pending update.
         const queue = yield* Queue.sliding<WorkspaceSignal>(1);
         const fiber = yield* Effect.forkScoped(workspaceSupervisor(agentId, queue));
         const handle: SupervisorHandle = { queue, fiber };

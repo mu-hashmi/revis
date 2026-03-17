@@ -477,12 +477,15 @@ function useDashboardData(): DashboardDataState {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  /** Refresh the session list and keep the best available selection. */
   const refreshSessions = useEffectEvent(async (): Promise<void> => {
     try {
       const nextSessions = await fetchSessions();
       startTransition(() => {
         setSessions(nextSessions);
         setSelectedSessionId((current) => {
+          // Keep the current selection when possible, otherwise prefer the live session and fall
+          // back to the newest archived session.
           if (current && nextSessions.some((session) => session.id === current)) {
             return current;
           }
@@ -500,6 +503,7 @@ function useDashboardData(): DashboardDataState {
     }
   });
 
+  /** Refresh live-session metadata after streamed events may have changed archive state. */
   const refreshLiveFrame = useEffectEvent(async (sessionId: string): Promise<void> => {
     try {
       const [nextSessions, nextMeta] = await Promise.all([
@@ -531,6 +535,7 @@ function useDashboardData(): DashboardDataState {
     setLoading(true);
     setLoadError(null);
 
+    /** Load the selected session metadata plus its archived event backlog. */
     const load = async (): Promise<void> => {
       try {
         const [nextMeta, nextEvents] = await Promise.all([
@@ -565,6 +570,7 @@ function useDashboardData(): DashboardDataState {
     };
   }, [selectedSessionId]);
 
+  /** Append one streamed runtime event and refresh live session metadata around it. */
   const handleSseMessage = useEffectEvent((payload: string): void => {
     const event = JSON.parse(payload) as RuntimeEvent;
 
@@ -573,6 +579,7 @@ function useDashboardData(): DashboardDataState {
     });
 
     if (selectedSessionId) {
+      // Live events can update session participants and session liveness, not just the event list.
       void refreshLiveFrame(selectedSessionId);
     }
   });
@@ -668,6 +675,7 @@ function useTimelineModel(
       return [];
     }
 
+    // Normalize raw runtime events into timeline nodes with stable keys and minute offsets.
     return events.map((event, index) => ({
       event,
       key: `${index}:${event.timestamp}:${event._tag}:${timelineAgentId(event) ?? "system"}:${eventSha(event) ?? "na"}`,
@@ -688,6 +696,7 @@ function useTimelineModel(
   const laneAgents = sessionMeta?.participants.map((participant) => participant.agentId) ?? [];
   const visibleAgents = laneAgents.filter((agentId) => selectedAgents.has(agentId));
 
+  // Filter the normalized event list down to the currently visible lanes, event kinds, and range.
   const filteredEvents = useMemo(
     () =>
       normalizedEvents.filter((event) => {
@@ -704,6 +713,7 @@ function useTimelineModel(
     [normalizedEvents, selectedAgents, selectedTypes, timeRange]
   );
 
+  // Count only the currently visible events so sidebar filters track the active viewport.
   const visibleCounts = useMemo(
     () =>
       normalizedEvents.reduce<TimelineCounts>(
@@ -728,6 +738,7 @@ function useTimelineModel(
     [normalizedEvents, selectedAgents, timeRange]
   );
 
+  // Prefer explicit selection over hover state when deciding which event to show in detail.
   const activeEvent =
     filteredEvents.find((event) => event.key === selectedEventKey) ??
     filteredEvents.find((event) => event.key === hoveredEventKey) ??
@@ -804,6 +815,8 @@ function eventMetadata(event: RuntimeEvent): Record<string, unknown> | null {
   const { timestamp: _timestamp, summary: _summary, _tag: _tag, ...rest } = event as RuntimeEvent &
     Record<string, unknown>;
 
+  // Agent and branch already live in dedicated UI chrome, so strip them to highlight the
+  // event-specific fields in the metadata pane.
   delete rest.agentId;
   delete rest.branch;
 
@@ -850,6 +863,7 @@ function labelForKind(kind: TimelineKind): string {
 /** Return a stable color from the fixed dashboard palette. */
 function agentColor(agentId: string, laneIndex: number): string {
   const match = /^agent-(\d+)$/.exec(agentId);
+  // Prefer the numeric agent suffix so colors stay stable even if lane ordering changes.
   const paletteIndex = match ? (Number(match[1]) - 1) % AGENT_COLORS.length : laneIndex % AGENT_COLORS.length;
   return AGENT_COLORS[(paletteIndex + AGENT_COLORS.length) % AGENT_COLORS.length]!;
 }

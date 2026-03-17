@@ -72,6 +72,7 @@ export interface WorkspaceProviderApi {
   ) => Effect.Effect<void, ProviderError>;
 }
 
+/** Abstract workspace runtime boundary shared by local and Daytona providers. */
 export class WorkspaceProvider extends Context.Tag("@revis/WorkspaceProvider")<
   WorkspaceProvider,
   WorkspaceProviderApi

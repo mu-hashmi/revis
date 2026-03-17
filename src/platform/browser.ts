@@ -25,6 +25,7 @@ export function presentUrl(url: string, options: OpenUrlOptions = {}) {
     try {
       openUrl(url);
     } catch (error) {
+      // The URL is already on stdout, so browser-launch failures should stay visible but non-fatal.
       const message = error instanceof Error ? error.message : String(error);
       writeErr(`Could not open browser: ${message}\n`);
     }

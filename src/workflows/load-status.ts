@@ -22,6 +22,7 @@ export function loadStatusSnapshot(options: LoadStatusOptions = {}) {
   const { eventLimit = 12, includeGitDetails = true } = options;
 
   return Effect.gen(function* () {
+    // Load the services and project context needed for one status render.
     const configService = yield* ProjectConfig;
     const eventJournal = yield* EventJournal;
     const hostGit = yield* HostGit;
@@ -32,6 +33,8 @@ export function loadStatusSnapshot(options: LoadStatusOptions = {}) {
     const operatorSlug = yield* hostGit.deriveOperatorSlug(paths.root);
     const syncBranch = syncTargetBranch(config.coordinationRemote, config.trunkBase);
     const snapshots = yield* store.list;
+
+    // Enrich workspace snapshots with git details when the caller wants the full operator view.
     const workspaces = includeGitDetails
       ? yield* Effect.forEach(
           snapshots,
@@ -53,10 +56,11 @@ export function loadStatusSnapshot(options: LoadStatusOptions = {}) {
           StatusWorkspace.make({
             snapshot,
             aheadCount: 0,
-            lastCommitSubject: ""
-          })
+              lastCommitSubject: ""
+            })
         );
 
+    // Assemble the final CLI/dashboard-facing snapshot from the composed services.
     return StatusSnapshot.make({
       root: paths.root,
       config,

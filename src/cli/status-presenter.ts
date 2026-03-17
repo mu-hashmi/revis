@@ -33,6 +33,7 @@ export function formatStatusSnapshot(snapshot: StatusSnapshot): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** Render one workspace row with its lifecycle tag and git position summary. */
 function formatWorkspace(workspace: StatusWorkspace): string {
   const state = workspace.snapshot.state;
   const details = [

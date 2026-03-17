@@ -21,6 +21,8 @@ export function makePromoteCommand(io: CliWriters) {
           const promotion = yield* PromotionService;
           const result = yield* promotion.promoteWorkspace(agentId);
 
+          // Promotion mutates remote state outside the normal daemon loop; if this nudge fails,
+          // the next poll still converges, so do not mask the successful promotion result.
           yield* daemon.reconcile("promote").pipe(Effect.ignore);
           yield* writeLine(writeOut, result.summary);
           if (result.pullRequest) {

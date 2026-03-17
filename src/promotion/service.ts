@@ -41,6 +41,7 @@ export interface PromotionServiceApi {
   readonly promoteWorkspace: (agentId: string) => Effect.Effect<PromotionResult, PromotionError>;
 }
 
+/** Operator-only service that promotes one tracked workspace through the configured flow. */
 export class PromotionService extends Context.Tag("@revis/PromotionService")<
   PromotionService,
   PromotionServiceApi
@@ -62,9 +63,12 @@ export const promotionServiceLayer = Layer.effect(
     const promoteWorkspace = Effect.fn("PromotionService.promoteWorkspace")(function* (
       agentId: string
     ) {
+      // Load the promotion target and current project policy.
       const config = yield* configService.load;
       const snapshot = yield* requirePromotionWorkspace(store, agentId);
 
+      // Always publish the latest workspace HEAD before choosing a promotion path so managed trunk
+      // and pull-request flows operate on the same remote-visible branch state.
       yield* pushWorkspaceHead(provider, snapshot, config.coordinationRemote);
 
       const result = usesManagedTrunk(config.coordinationRemote)
@@ -97,6 +101,7 @@ export const promotionServiceLayer = Layer.effect(
   })
 );
 
+/** Resolve one existing workspace or fail with an operator-facing validation error. */
 function requirePromotionWorkspace(
   store: WorkspaceStoreApi,
   agentId: string

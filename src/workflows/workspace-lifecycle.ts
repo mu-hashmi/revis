@@ -22,6 +22,7 @@ import { isoNow } from "../platform/time";
 /** Create and register a batch of new workspaces. */
 export function createWorkspaces(count: number, execCommand: string) {
   return Effect.gen(function* () {
+    // Load project configuration and resolve the shared coordination target for this batch.
     const configService = yield* ProjectConfig;
     const config = yield* configService.load;
     const hostGit = yield* HostGit;
@@ -38,6 +39,7 @@ export function createWorkspaces(count: number, execCommand: string) {
       : yield* hostGit.remoteUrl(projectRoot, config.coordinationRemote);
     const existing = yield* store.list;
 
+    // Allocate agent ids first, then provision each workspace in parallel.
     return yield* Effect.forEach(
       allocateAgentIds(existing, count),
       (agentId) =>
@@ -133,6 +135,7 @@ export function stopAllWorkspaces() {
   });
 }
 
+/** Allocate the next `count` workspace ids using the lowest unused `agent-N` values. */
 function allocateAgentIds(
   snapshots: ReadonlyArray<WorkspaceSnapshot>,
   count: number
@@ -144,6 +147,7 @@ function allocateAgentIds(
 
   let candidate = 1;
   while (result.length < count) {
+    // Fill gaps first so workspace numbering remains compact and predictable for operators.
     if (!used.has(candidate)) {
       result.push(asAgentId(`agent-${candidate}`));
     }

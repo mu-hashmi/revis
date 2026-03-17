@@ -97,7 +97,10 @@ export function daemonApiReady(apiBaseUrl: string): Effect.Effect<boolean, Daemo
     },
     catch: (error) =>
       DaemonUnavailableError.make({ message: error instanceof Error ? error.message : String(error) })
-  }).pipe(Effect.catchAll(() => Effect.succeed(false)));
+  }).pipe(
+    // Readiness probes answer a yes/no question; callers decide whether to retry or clear state.
+    Effect.catchAll(() => Effect.succeed(false))
+  );
 }
 
 /** Post one daemon control payload. */

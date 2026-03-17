@@ -34,11 +34,13 @@ export function daemonRouter(options: RouterOptions) {
   );
 }
 
+/** Dispatch daemon GET routes for health, status, archives, git detail, and assets. */
 function handleGetRequest(options: RouterOptions) {
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = new URL(request.url, "http://localhost");
 
+    // Health and live daemon status endpoints.
     if (url.pathname === "/health") {
       return HttpServerResponse.text("ok\n");
     }
@@ -60,6 +62,7 @@ function handleGetRequest(options: RouterOptions) {
       return yield* streamLiveEvents();
     }
 
+    // Archived session index and per-session payloads.
     if (url.pathname === "/api/sessions") {
       const eventJournal = yield* EventJournal;
       const sessions = yield* eventJournal.listSessions;
@@ -88,6 +91,7 @@ function handleGetRequest(options: RouterOptions) {
       return yield* HttpServerResponse.json(events);
     }
 
+    // Raw git commit detail used by the dashboard event panel.
     if (url.pathname === "/api/git/show") {
       const sha = url.searchParams.get("sha");
       if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha)) {
@@ -103,6 +107,7 @@ function handleGetRequest(options: RouterOptions) {
       });
     }
 
+    // Everything else is served from the packaged dashboard bundle.
     const assetPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
 
     return yield* respondStaticFile(
@@ -120,12 +125,14 @@ function handleGetRequest(options: RouterOptions) {
   );
 }
 
+/** Dispatch daemon POST control routes for reconcile, stop, and shutdown actions. */
 function handlePostRequest(options: RouterOptions) {
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = new URL(request.url, "http://localhost");
     const body = (yield* Effect.orDie(request.json)) as Record<string, unknown>;
 
+    // Interactive reconcile requests from CLI commands.
     if (url.pathname === "/api/control/reconcile") {
       const reason = body.reason;
       if (reason !== "spawn" && reason !== "promote" && reason !== "manual") {
@@ -136,6 +143,7 @@ function handlePostRequest(options: RouterOptions) {
       return yield* HttpServerResponse.json({ ok: true });
     }
 
+    // Workspace stop requests share one endpoint for targeted or stop-all operations.
     if (url.pathname === "/api/control/stop") {
       const agentIds = Array.isArray(body.agentIds)
         ? body.agentIds.map(String)
@@ -144,6 +152,7 @@ function handlePostRequest(options: RouterOptions) {
       return yield* HttpServerResponse.json({ ok: true });
     }
 
+    // Shutdown is separate so the daemon can flush final state before exiting.
     if (url.pathname === "/api/control/shutdown") {
       yield* options.onShutdown(typeof body.reason === "string" ? body.reason : "shutdown");
       return yield* HttpServerResponse.json({ ok: true });

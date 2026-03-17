@@ -65,41 +65,43 @@ export function initializeProject(
 /** Append the new Revis local-state paths to `.gitignore` when missing. */
 export const ensureGitignore: Effect.Effect<void, StorageError, FileSystem.FileSystem | ProjectPaths> =
   Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const paths = yield* ProjectPaths;
-  const gitignorePath = `${paths.root}/.gitignore`;
-  const existing = yield* fs.readFileString(gitignorePath).pipe(
-    Effect.catchTag("SystemError", (error) =>
-      error.reason === "NotFound" ? Effect.succeed("") : Effect.fail(error)
-    ),
-    Effect.mapError((error) =>
-      StorageError.make({
-        path: gitignorePath,
-        message: error.message
-      })
-    )
-  );
-  const lines = [
-    "# Revis runtime state stays local.",
-    ".revis/state/",
-    ".revis/journal/",
-    ".revis/archive/",
-    ".revis/workspaces/",
-    ".revis/coordination.git/"
-  ];
-  const missing = lines.filter((line) => !existing.includes(line));
+    const fs = yield* FileSystem.FileSystem;
+    const paths = yield* ProjectPaths;
+    const gitignorePath = `${paths.root}/.gitignore`;
 
-  if (missing.length === 0) {
-    return;
-  }
+    const existing = yield* fs.readFileString(gitignorePath).pipe(
+      Effect.catchTag("SystemError", (error) =>
+        error.reason === "NotFound" ? Effect.succeed("") : Effect.fail(error)
+      ),
+      Effect.mapError((error) =>
+        StorageError.make({
+          path: gitignorePath,
+          message: error.message
+        })
+      )
+    );
 
-  const prefix = existing.endsWith("\n") || existing.length === 0 ? "" : "\n";
-  yield* fs.writeFileString(gitignorePath, `${existing}${prefix}${missing.join("\n")}\n`).pipe(
-    Effect.mapError((error) =>
-      StorageError.make({
-        path: gitignorePath,
-        message: error.message
-      })
-    )
-  );
-});
+    const lines = [
+      "# Revis runtime state stays local.",
+      ".revis/state/",
+      ".revis/journal/",
+      ".revis/archive/",
+      ".revis/workspaces/",
+      ".revis/coordination.git/"
+    ];
+    const missing = lines.filter((line) => !existing.includes(line));
+
+    if (missing.length === 0) {
+      return;
+    }
+
+    const prefix = existing.endsWith("\n") || existing.length === 0 ? "" : "\n";
+    yield* fs.writeFileString(gitignorePath, `${existing}${prefix}${missing.join("\n")}\n`).pipe(
+      Effect.mapError((error) =>
+        StorageError.make({
+          path: gitignorePath,
+          message: error.message
+        })
+      )
+    );
+  });

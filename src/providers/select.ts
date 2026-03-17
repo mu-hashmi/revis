@@ -10,6 +10,7 @@ import { daytonaWorkspaceProviderLayer } from "./daytona";
 import { localWorkspaceProviderLayer } from "./local";
 import { WorkspaceProvider } from "./contract";
 
+/** Select the concrete workspace provider layer for the project's configured runtime. */
 export function workspaceProviderLayer(
   kind: SandboxProvider
 ): Layer.Layer<WorkspaceProvider, never, HostGit | ProjectPaths | CommandExecutor.CommandExecutor> {

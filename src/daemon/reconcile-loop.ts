@@ -42,12 +42,14 @@ interface GlobalReconcileOptions {
 export function makeGlobalReconcile(options: GlobalReconcileOptions) {
   return (reason: ReconcileReason) =>
     Effect.gen(function* () {
+      // Ensure the current daemon lifetime is represented by one active session archive.
       yield* options.eventJournal.ensureActiveSession({
         coordinationRemote: options.config.coordinationRemote,
         trunkBase: options.config.trunkBase,
         operatorSlug: options.operatorSlug
       });
 
+      // Refresh host-side refs before computing the new sync target.
       yield* options.hostGit.fetchCoordinationRefs(
         options.paths.root,
         options.config.coordinationRemote,
@@ -59,6 +61,7 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
         remoteTrackingRef(options.config.coordinationRemote, options.syncBranch)
       );
 
+      // Persist the latest remote state so CLI and dashboard consumers can render it immediately.
       const currentDaemon = yield* options.store.daemonState;
       if (currentDaemon) {
         yield* options.store.setDaemonState(
@@ -73,6 +76,7 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
         );
       }
 
+      // Record the sync event, then fan the new target out to every workspace supervisor.
       yield* options.eventJournal.append(
         RemoteSynced.make({
           timestamp: isoNow(),
@@ -91,6 +95,7 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
       yield* options.eventJournal.syncParticipants(snapshots);
     }).pipe(
       Effect.catchAll((error) =>
+        // Persist the latest daemon error for operators, but keep the reconcile loop alive.
         options.store.daemonState.pipe(
           Effect.flatMap((current) =>
             current
@@ -115,6 +120,8 @@ export function scheduleBurstReconciliations(
 ): Effect.Effect<void> {
   return Effect.fork(
     Effect.gen(function* () {
+      // Interactive mutations can land follow-up refs shortly after the first push, so schedule
+      // two delayed reconciles to catch that second wave without tightening the steady-state poll.
       yield* Effect.sleep("1 second");
       yield* Queue.offer(queue, reason);
       yield* Effect.sleep("1 second");

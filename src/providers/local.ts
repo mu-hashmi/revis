@@ -44,6 +44,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
     const hostGit = yield* HostGit;
     const paths = yield* ProjectPaths;
 
+    /** Provision one fresh local workspace clone plus its runtime files. */
     const provision = Effect.fn("WorkspaceProvider.local.provision")(function* (
       params: ProvisionWorkspaceParams
     ) {
@@ -87,9 +88,11 @@ export const localWorkspaceProviderLayer = Layer.effect(
       } satisfies ProvisionedWorkspace;
     });
 
+    /** Start the next detached local iteration and return the child PID as the session id. */
     const startIteration = Effect.fn("WorkspaceProvider.local.startIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
+      // Reset the runtime files that the daemon uses to inspect detached process state.
       const logPath = paths.workspaceLogFile(snapshot.agentId);
       const exitPath = paths.workspaceExitFile(snapshot.agentId);
       const shell = process.env.SHELL ?? "/bin/sh";
@@ -104,6 +107,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
         catch: (error) => providerError("local", "open iteration log", String(error))
       });
 
+      // Spawn one detached shell so the workspace can keep running after the CLI exits.
       const child = spawn(
         shell,
         [
@@ -149,6 +153,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       return asWorkspaceSessionId(String(child.pid));
     });
 
+    /** Inspect the currently recorded detached process for one local workspace. */
     const inspectSession = Effect.fn("WorkspaceProvider.local.inspectSession")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -186,6 +191,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
         : ({ phase: "exited" } satisfies WorkspaceSessionStatus);
     });
 
+    /** Tail the persisted local session log into a bounded list of activity lines. */
     const captureActivity = Effect.fn("WorkspaceProvider.local.captureActivity")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -206,6 +212,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
         .slice(-ACTIVITY_LINE_LIMIT);
     });
 
+    /** Run one command directly inside the local workspace checkout. */
     const runInWorkspace = Effect.fn("WorkspaceProvider.local.runInWorkspace")(function* (
       snapshot: WorkspaceSnapshot,
       argv: ReadonlyArray<string>,
@@ -217,6 +224,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       });
     });
 
+    /** Interrupt the detached local iteration process, if one is still running. */
     const interruptIteration = Effect.fn("WorkspaceProvider.local.interruptIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -237,6 +245,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       yield* stopLocalProcess(pid);
     });
 
+    /** Tear down the local workspace runtime directory after stopping its process. */
     const destroyWorkspace = Effect.fn("WorkspaceProvider.local.destroyWorkspace")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -289,6 +298,7 @@ function localWrapperScript(execCommand: string, exitPath: string, iteration: nu
 
   return [
     `export REVIS_ITERATION=${iteration}`,
+    // Persist the final exit code because the detached child may outlive the daemon process.
     `write_exit() { printf '%s\\n' \"$1\" > ${escapedExitPath}; }`,
     "trap 'write_exit 130; exit 130' INT",
     "trap 'write_exit 143; exit 143' TERM",

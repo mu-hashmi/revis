@@ -49,6 +49,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       return daytona;
     };
 
+    /** Provision one Daytona sandbox and clone the workspace checkout into it. */
     const provision = Effect.fn("WorkspaceProvider.daytona.provision")(function* (
       params: ProvisionWorkspaceParams
     ) {
@@ -59,6 +60,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
           getDaytona().create({
             name: `revis-${params.operatorSlug}-${params.agentId}`,
             labels: daytonaWorkspaceLabels(params.root, params.operatorSlug, params.agentId),
+            // Revis workspaces are long-lived coordination sandboxes, not ephemeral preview envs.
             autoStopInterval: 0,
             autoDeleteInterval: -1,
             ephemeral: false
@@ -116,6 +118,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       } satisfies ProvisionedWorkspace;
     });
 
+    /** Start the next asynchronous Daytona session inside one provisioned sandbox. */
     const startIteration = Effect.fn("WorkspaceProvider.daytona.startIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -157,6 +160,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       return sessionId;
     });
 
+    /** Inspect the last command recorded for the current Daytona session. */
     const inspectSession = Effect.fn("WorkspaceProvider.daytona.inspectSession")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -176,6 +180,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       } satisfies WorkspaceSessionStatus;
     });
 
+    /** Capture the latest bounded activity log for one Daytona session. */
     const captureActivity = Effect.fn("WorkspaceProvider.daytona.captureActivity")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -198,6 +203,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
         .slice(-ACTIVITY_LINE_LIMIT);
     });
 
+    /** Run one synchronous command inside the Daytona sandbox checkout. */
     const runInWorkspace = Effect.fn("WorkspaceProvider.daytona.runInWorkspace")(function* (
       snapshot: WorkspaceSnapshot,
       argv: ReadonlyArray<string>,
@@ -232,6 +238,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       return completed;
     });
 
+    /** Delete the currently tracked Daytona session, if one exists. */
     const interruptIteration = Effect.fn("WorkspaceProvider.daytona.interruptIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
@@ -247,6 +254,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       });
     });
 
+    /** Destroy the backing Daytona sandbox after stopping its active session. */
     const destroyWorkspace = Effect.fn("WorkspaceProvider.daytona.destroyWorkspace")(function* (
       snapshot: WorkspaceSnapshot
     ) {

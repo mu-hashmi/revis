@@ -42,6 +42,7 @@ export interface WorkspaceStoreApi {
   readonly changes: Stream.Stream<WorkspaceStoreChange>;
 }
 
+/** Persisted source of truth for daemon state and workspace snapshots. */
 export class WorkspaceStore extends Context.Tag("@revis/WorkspaceStore")<
   WorkspaceStore,
   WorkspaceStoreApi
@@ -53,9 +54,11 @@ export const workspaceStoreLayer = Layer.scoped(
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* ProjectPaths;
 
+    // Prepare the on-disk state directories.
     yield* ensureDirectory(fs, paths.stateDir);
     yield* ensureDirectory(fs, paths.workspaceStateDir);
 
+    // Recover persisted daemon and workspace state into in-memory refs.
     const snapshots = yield* loadWorkspaceSnapshots(fs, paths);
     const daemonState = yield* readJsonFileOrNull(fs, paths.daemonStateFile, DaemonState);
     const snapshotsRef = yield* Ref.make(
@@ -67,6 +70,7 @@ export const workspaceStoreLayer = Layer.scoped(
       (changes) => PubSub.shutdown(changes)
     );
 
+    // Expose CRUD operations plus a lightweight change stream for in-process consumers.
     const list = Ref.get(snapshotsRef).pipe(
       Effect.map((current) =>
         [...current.values()].sort((left, right) =>
@@ -130,6 +134,7 @@ export const workspaceStoreLayer = Layer.scoped(
   })
 );
 
+/** Load every persisted workspace snapshot from the state directory. */
 function loadWorkspaceSnapshots(
   fs: FileSystem.FileSystem,
   paths: ProjectPathsApi
@@ -160,6 +165,7 @@ function loadWorkspaceSnapshots(
   );
 }
 
+/** Sort `agent-N` ids numerically so operator-facing views stay in stable human order. */
 function compareAgentIds(left: AgentId | string, right: AgentId | string): number {
   const leftValue = Number.parseInt(String(left).replace(/^agent-/, ""), 10);
   const rightValue = Number.parseInt(String(right).replace(/^agent-/, ""), 10);

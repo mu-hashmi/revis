@@ -30,11 +30,13 @@ export interface ProjectPathsApi {
   readonly workspaceStateFile: (agentId: AgentId | string) => string;
 }
 
+/** Project-local path service that owns every `.revis` location computation. */
 export class ProjectPaths extends Context.Tag("@revis/ProjectPaths")<
   ProjectPaths,
   ProjectPathsApi
 >() {}
 
+/** Build the project-local path service for one initialized repository root. */
 export function projectPathsLayer(root: string) {
   return Layer.effect(
     ProjectPaths,
@@ -46,6 +48,9 @@ export function projectPathsLayer(root: string) {
       const journalDir = path.join(revisDir, "journal");
       const archiveDir = path.join(revisDir, "archive");
       const sessionsDir = path.join(archiveDir, "sessions");
+
+      // Resolve dashboard assets relative to this module so the daemon can find the bundled UI
+      // without depending on the operator's current working directory.
       const dashboardRoot = yield* path.fromFileUrl(new URL("../dashboard/", import.meta.url)).pipe(
         Effect.orDie
       );
