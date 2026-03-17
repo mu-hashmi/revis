@@ -2,24 +2,20 @@
 
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { open as openFile, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { extname, join, relative, resolve, sep } from "node:path";
 
 import { RevisError } from "../core/error";
 import { runCommand } from "../core/process";
-import { loadLiveSession, sessionEventsPath, sessionsDir } from "./runtime";
+import { loadRuntimeStore } from "./runtime-access";
 
 export interface DashboardServerOptions {
   noOpen?: boolean;
   port?: number;
   stderr?: (text: string) => void;
   stdout?: (text: string) => void;
-}
-
-interface JsonlTailState {
-  offset: number;
-  remainder: string;
 }
 
 /** Start the dashboard server, print its URL, and keep it alive until interrupted. */
@@ -60,11 +56,7 @@ export async function runDashboardServer(
     });
   });
 
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new RevisError("Dashboard server did not expose a TCP address");
-  }
-
+  const address = server.address() as AddressInfo;
   const url = `http://${host}:${address.port}/`;
   writeOut(`${url}\n`);
 
@@ -120,11 +112,7 @@ async function handleDashboardRequest(
   if (url.pathname === "/sessions" || url.pathname.startsWith("/sessions/")) {
     const relativePath =
       url.pathname === "/sessions" ? "index.json" : url.pathname.slice("/sessions/".length);
-    await respondFile(
-      response,
-      await resolveSafePath(sessionsDir(root), relativePath),
-      contentTypeForPath(relativePath)
-    );
+    await respondSessionResource(root, response, relativePath);
     return;
   }
 
@@ -166,18 +154,13 @@ async function respondGitShow(
 
 /** Stream appended live-session events over SSE. */
 async function streamLiveEvents(root: string, response: ServerResponse): Promise<void> {
-  const session = await loadLiveSession(root);
+  const runtime = await loadRuntimeStore(root);
+  const session = await runtime.loadLiveSession();
   if (!session) {
     respondText(response, 204, "");
     return;
   }
-
-  const logPath = sessionEventsPath(root, session.id);
-  const initial = await stat(logPath);
-  let state: JsonlTailState = {
-    offset: initial.size,
-    remainder: ""
-  };
+  let cursor = (await runtime.loadSessionEvents(session.id)).length;
 
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -204,62 +187,22 @@ async function streamLiveEvents(root: string, response: ServerResponse): Promise
       return;
     }
 
-    const live = await loadLiveSession(root);
+    const live = await runtime.loadLiveSession();
     if (!live || live.id !== session.id) {
       response.end();
       close();
       return;
     }
 
-    const next = await readAppendedJsonl(logPath, state);
-    state = {
-      offset: next.offset,
-      remainder: next.remainder
-    };
-
-    for (const payload of next.lines) {
-      response.write(`data: ${payload}\n\n`);
+    const next = await runtime.loadSessionEvents(session.id);
+    if (next.length <= cursor) {
+      return;
     }
-  };
-}
 
-/** Read appended JSONL payloads from one event log. */
-async function readAppendedJsonl(
-  path: string,
-  state: JsonlTailState
-): Promise<{
-  lines: string[];
-  offset: number;
-  remainder: string;
-}> {
-  const info = await stat(path);
-  if (info.size <= state.offset) {
-    return {
-      lines: [],
-      offset: state.offset,
-      remainder: state.remainder
-    };
-  }
-
-  const handle = await openFile(path, "r");
-  const length = info.size - state.offset;
-  const buffer = Buffer.alloc(length);
-
-  try {
-    await handle.read(buffer, 0, length, state.offset);
-  } finally {
-    await handle.close();
-  }
-
-  const chunk = `${state.remainder}${buffer.toString("utf8")}`;
-  const complete = chunk.endsWith("\n");
-  const parts = chunk.split(/\r?\n/);
-  const remainder = complete ? "" : parts.pop() ?? "";
-
-  return {
-    lines: parts.filter(Boolean),
-    offset: info.size,
-    remainder
+    for (const event of next.slice(cursor)) {
+      response.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+    cursor = next.length;
   };
 }
 
@@ -288,6 +231,45 @@ async function respondFile(
   response.end(payload);
 }
 
+/** Serve one session archive resource through the provider-aware runtime store. */
+async function respondSessionResource(
+  root: string,
+  response: ServerResponse,
+  relativePath: string
+): Promise<void> {
+  const runtime = await loadRuntimeStore(root);
+
+  if (relativePath === "index.json") {
+    respondJson(response, await runtime.loadSessionIndex());
+    return;
+  }
+
+  const match = /^([^/]+)\/(meta\.json|events\.jsonl)$/.exec(relativePath);
+  if (!match) {
+    respondText(response, 404, "Not found\n");
+    return;
+  }
+
+  const sessionId = match[1]!;
+  if (match[2] === "meta.json") {
+    const meta = await runtime.loadSessionMeta(sessionId);
+    if (!meta) {
+      respondText(response, 404, "Not found\n");
+      return;
+    }
+
+    respondJson(response, meta);
+    return;
+  }
+
+  const events = await runtime.loadSessionEvents(sessionId);
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  response.end(events.map((event) => JSON.stringify(event)).join("\n"));
+}
+
 /** Write a plain-text HTTP response. */
 function respondText(response: ServerResponse, status: number, body: string): void {
   response.writeHead(status, {
@@ -295,6 +277,15 @@ function respondText(response: ServerResponse, status: number, body: string): vo
     "Cache-Control": "no-store"
   });
   response.end(body);
+}
+
+/** Write a JSON HTTP response. */
+function respondJson(response: ServerResponse, payload: unknown): void {
+  response.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  response.end(JSON.stringify(payload));
 }
 
 /** Return the HTTP content type for one served file. */

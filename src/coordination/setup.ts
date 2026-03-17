@@ -19,7 +19,8 @@ export async function buildDefaultConfig(root: string): Promise<RevisConfig> {
   return {
     coordinationRemote: remoteName,
     trunkBase: await currentBranch(root),
-    remotePollSeconds: DEFAULT_REMOTE_POLL_SECONDS
+    remotePollSeconds: DEFAULT_REMOTE_POLL_SECONDS,
+    sandboxProvider: "local"
   };
 }
 

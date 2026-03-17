@@ -20,24 +20,33 @@ export async function runCli(
 ): Promise<{ stdout: string; stderr: string }> {
   const cwd = process.cwd();
   const originalExecutable = process.env.REVIS_EXECUTABLE;
+  const originalExit = process.exit;
   let stdout = "";
   let stderr = "";
 
   process.chdir(root);
   process.env.REVIS_EXECUTABLE = await ensureBuiltCli();
+  process.exit = ((code?: number) => {
+    throw new Error(
+      stderr.trim() || stdout.trim() || `process.exit unexpectedly called with "${code ?? 0}"`
+    );
+  }) as typeof process.exit;
 
   try {
-    await buildCli({
+    const program = buildCli({
       stderr(text) {
         stderr += text;
       },
       stdout(text) {
         stdout += text;
       }
-    }).parseAsync(args, {
+    }).exitOverride();
+
+    await program.parseAsync(args, {
       from: "user"
     });
   } finally {
+    process.exit = originalExit;
     process.env.REVIS_EXECUTABLE = originalExecutable;
     process.chdir(cwd);
   }

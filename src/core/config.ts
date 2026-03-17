@@ -2,7 +2,7 @@
 
 import { join } from "node:path";
 
-import type { RevisConfig } from "./models";
+import type { RevisConfig, SandboxProvider } from "./models";
 import { RevisError } from "./error";
 import { pathExists, readJson, writeJson } from "./files";
 
@@ -29,7 +29,8 @@ export async function loadConfig(root: string): Promise<RevisConfig> {
     remotePollSeconds: requiredPositiveInteger(
       data.remotePollSeconds,
       "remotePollSeconds"
-    )
+    ),
+    sandboxProvider: requiredSandboxProvider(data.sandboxProvider)
   };
 }
 
@@ -62,4 +63,13 @@ function requiredPositiveInteger(
   }
 
   return value;
+}
+
+/** Require one configured sandbox provider. */
+function requiredSandboxProvider(value: SandboxProvider | undefined): SandboxProvider {
+  if (value === "local" || value === "daytona") {
+    return value;
+  }
+
+  throw new RevisError(`Config is missing valid sandboxProvider`);
 }

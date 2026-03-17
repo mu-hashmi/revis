@@ -1,27 +1,33 @@
 import { loadEvents, loadWorkspaceRecords } from "../src/coordination/runtime";
+import { notifyDaemon } from "../src/coordination/daemon";
 import { promoteWorkspace } from "../src/coordination/promotion";
 import { createWorkspaces } from "../src/coordination/workspaces";
-import { daemonSocketPath } from "../src/core/ipc";
 import { runCommand } from "../src/core/process";
 import { createFakeGh } from "./cli-helpers";
 import {
   cleanupRepo,
   commitWorkspaceChange,
   createCleanupStack,
-  createWorkspaceHarness,
   createSharedRemote,
+  createWorkspaceHarness,
+  exitWorkspaceSession,
   initializeRevis,
-  waitFor
+  killWorkspaceSession,
+  waitFor,
+  waitForWorkspaceRecord
 } from "./helpers";
+
+const LONG_RUNNING_EXEC = "sleep 30";
 
 describe("promotion flows", () => {
   const cleanups = createCleanupStack();
 
   afterEach(cleanups.drain);
 
-  test("promote merges into managed trunk and rebases other clean workspaces", async () => {
+  test("promote merges into managed trunk and rebases clean siblings before restart", async () => {
     const { config, daemon, root, workspaces } = await createWorkspaceHarness({
       count: 2,
+      execCommand: LONG_RUNNING_EXEC,
       user: {
         userName: "Alice Example",
         userEmail: "alice@example.com"
@@ -29,16 +35,13 @@ describe("promotion flows", () => {
     });
     cleanups.add(() => cleanupRepo(root, daemon));
 
-    await commitWorkspaceChange(workspaces[0]!.repoPath, "agent one update");
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return (
-        records
-          .find((record) => record.agentId === "agent-2")
-          ?.queuedSteeringMessages?.some((line) => line.includes("agent one update"))
-          ?? false
-      );
-    });
+    const sibling = await waitForWorkspaceRecord(
+      root,
+      "agent-2",
+      (record) => record.iteration === 1 && record.state === "active"
+    );
+
+    await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "agent one update");
 
     const result = await promoteWorkspace(root, config, "agent-1");
     expect(result.mode).toBe("local");
@@ -53,13 +56,18 @@ describe("promotion flows", () => {
       ])
     ).stdout.trim();
 
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return (
-        records.find((record) => record.agentId === "agent-2")?.lastRebasedOntoSha ===
-        trunkSha
-      );
-    });
+    await killWorkspaceSession(sibling);
+
+    await waitForWorkspaceRecord(
+      root,
+      "agent-2",
+      (record) =>
+        record.iteration >= 2 &&
+        record.state === "active" &&
+        record.lastRebasedOntoSha === trunkSha &&
+        record.currentSessionId !== undefined,
+      15_000
+    );
 
     await waitFor(async () => {
       const events = await loadEvents(root);
@@ -69,12 +77,13 @@ describe("promotion flows", () => {
           event.agentId === "agent-2" &&
           event.summary.includes(trunkSha.slice(0, 8))
       );
-    });
+    }, 15_000);
   });
 
-  test("dirty workspaces are marked pending when trunk advances", async () => {
+  test("dirty workspaces are blocked until they are cleaned and reconciled", async () => {
     const { config, daemon, root, workspaces } = await createWorkspaceHarness({
       count: 2,
+      execCommand: LONG_RUNNING_EXEC,
       user: {
         userName: "Alice Example",
         userEmail: "alice@example.com"
@@ -82,10 +91,16 @@ describe("promotion flows", () => {
     });
     cleanups.add(() => cleanupRepo(root, daemon));
 
+    const sibling = await waitForWorkspaceRecord(
+      root,
+      "agent-2",
+      (record) => record.iteration === 1 && record.state === "active"
+    );
+
     await runCommand(["sh", "-lc", "printf 'dirty\\n' >> README.md"], {
-      cwd: workspaces[1]!.repoPath
+      cwd: workspaces[1]!.workspaceRoot
     });
-    await commitWorkspaceChange(workspaces[0]!.repoPath, "promote dirty pending");
+    await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "promote dirty pending");
     await promoteWorkspace(root, config, "agent-1");
 
     const trunkSha = (
@@ -98,20 +113,48 @@ describe("promotion flows", () => {
       ])
     ).stdout.trim();
 
+    await exitWorkspaceSession(sibling);
+
+    const blocked = await waitForWorkspaceRecord(
+      root,
+      "agent-2",
+      (record) =>
+        record.state === "failed" &&
+        record.iteration === 1 &&
+        record.rebaseRequiredSha === trunkSha &&
+        record.currentSessionId === undefined,
+      15_000
+    );
+
+    expect(blocked.lastError).toBeUndefined();
+
     await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return (
-        records.find((record) => record.agentId === "agent-2")?.rebaseRequiredSha ===
-        trunkSha
+      const events = await loadEvents(root);
+      return events.some(
+        (event) =>
+          event.type === "workspace_rebase_pending" && event.agentId === "agent-2"
       );
+    }, 15_000);
+
+    await runCommand(["git", "checkout", "--", "README.md"], {
+      cwd: workspaces[1]!.workspaceRoot
+    });
+    await notifyDaemon(root, {
+      type: "reconcile",
+      reason: "manual-clean"
     });
 
-    const records = await loadWorkspaceRecords(root);
-    expect(
-      records
-        .find((record) => record.agentId === "agent-2")
-        ?.queuedSteeringMessages?.some((line) => line.includes("rebase is pending"))
-    ).toBe(true);
+    await waitForWorkspaceRecord(
+      root,
+      "agent-2",
+      (record) =>
+        record.iteration >= 2 &&
+        record.state === "active" &&
+        record.lastRebasedOntoSha === trunkSha &&
+        record.rebaseRequiredSha === undefined &&
+        record.currentSessionId !== undefined,
+      15_000
+    );
   });
 
   test("reuses GitHub pull requests for remote-backed promotion", async () => {
@@ -130,7 +173,7 @@ describe("promotion flows", () => {
       aliceRoot,
       config,
       1,
-      daemonSocketPath(aliceRoot)
+      LONG_RUNNING_EXEC
     );
     cleanups.add(async () => {
       await cleanupRepo(aliceRoot);
@@ -138,7 +181,7 @@ describe("promotion flows", () => {
       await cleanupRepo(remotePath);
     });
 
-    await commitWorkspaceChange(workspaces[0]!.repoPath, "open remote pr");
+    await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "open remote pr");
     await runCommand(
       ["git", "remote", "set-url", "origin", "https://github.com/example/revis.git"],
       {

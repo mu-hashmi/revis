@@ -1,24 +1,15 @@
-/** Host daemon for commit relay, remote sync, and workspace rebasing. */
+/** Host daemon for iteration lifecycle, remote sync, and workspace rebasing. */
 
 import net from "node:net";
 import process from "node:process";
-import { readFile, writeFile } from "node:fs/promises";
 
-import type {
-  CommitNotification,
-  CommitSummary,
-  DaemonRecord,
-  RelayRegistry,
-  RevisConfig,
-  WorkspaceRecord
-} from "../core/models";
-import { loadConfig } from "../core/config";
+import type { DaemonRecord, DaemonRequest, RevisConfig, WorkspaceRecord } from "../core/models";
+import { configExists, loadConfig } from "../core/config";
 import { RevisError } from "../core/error";
-import { pathExists } from "../core/files";
 import { daemonSocketPath, removeSocketPath } from "../core/ipc";
 import {
   currentRevisCommand,
-  runCommand,
+  processAlive,
   sleep,
   spawnReadyProcess
 } from "../core/process";
@@ -28,33 +19,29 @@ import {
   deleteDaemonRecord,
   ensureRuntime,
   loadDaemonRecord,
-  loadRelayRegistry,
   loadWorkspaceRecords,
   writeDaemonRecord,
-  writeRelayRegistry,
   writeWorkspaceRecord
 } from "./runtime";
+import { createWorkspaceProvider, type WorkspaceProvider } from "./provider";
 import {
-  commitSummaryForRef,
-  currentBranch,
-  currentHeadSha,
-  deriveOperatorSlug,
   fetchCoordinationRefs,
-  fetchRemoteRefs,
   gitClient,
-  listRemoteWorkspaceHeads,
-  pushBranch,
-  remoteTrackingRef,
   syncTargetBranch
 } from "./repo";
 import {
-  refreshWorkspaceSnapshots,
-  sendSteeringMessage,
-  readLastRelayedSha,
-  writeLastRelayedSha
-} from "./workspaces";
+  fetchWorkspaceCoordinationRefs,
+  pushWorkspaceHead,
+  rebaseWorkspaceOntoSyncTarget,
+  workspaceCurrentBranch,
+  workspaceHeadSubject,
+  workspaceHeadSha,
+  workspaceWorkingTreeDirty
+} from "./workspace-git";
+import { captureWorkspaceActivity } from "./workspaces";
 
 const START_TIMEOUT_MS = 10_000;
+const DAYTONA_START_TIMEOUT_MS = 60_000;
 const SOCKET_CONNECT_TIMEOUT_MS = 400;
 const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
 const SOCKET_SHUTDOWN_REQUEST_TIMEOUT_MS = 1_000;
@@ -67,7 +54,7 @@ const EXPECTED_SOCKET_CONNECT_ERRORS = new Set([
 ]);
 
 export interface DaemonCycleReason {
-  notification: CommitNotification;
+  request: DaemonRequest;
 }
 
 /** Return whether a daemon IPC endpoint already accepts connections. */
@@ -99,25 +86,17 @@ export async function daemonSocketReady(socketPath: string): Promise<boolean> {
 
 /** Return whether the persisted daemon record still points at a live process. */
 export function daemonProcessAlive(record: DaemonRecord): boolean {
-  try {
-    process.kill(record.pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") {
-      return false;
-    }
-    if (code === "EPERM") {
-      return true;
-    }
-
-    throw error;
+  if (!record.pid) {
+    return false;
   }
+
+  return processAlive(record.pid);
 }
 
-/** Start the host daemon when it is not already running. */
+/** Start the daemon when it is not already running. */
 export async function ensureDaemonRunning(root: string): Promise<DaemonRecord> {
   const socketPath = daemonSocketPath(root);
+  const config = await loadConfig(root);
 
   if (await daemonSocketReady(socketPath)) {
     const existing = await loadDaemonRecord(root);
@@ -137,7 +116,7 @@ export async function ensureDaemonRunning(root: string): Promise<DaemonRecord> {
     );
   }
 
-  if (existing) {
+  if (existing?.socketPath) {
     await removeSocketPath(existing.socketPath);
     await deleteDaemonRecord(root);
   }
@@ -150,77 +129,44 @@ export async function ensureDaemonRunning(root: string): Promise<DaemonRecord> {
       REVIS_DAEMON_READY_STDOUT: "1"
     },
     readyLine: DAEMON_READY_LINE,
-    timeoutMs: START_TIMEOUT_MS
+    timeoutMs:
+      config.sandboxProvider === "daytona" ? DAYTONA_START_TIMEOUT_MS : START_TIMEOUT_MS
   });
-  return (await loadDaemonRecord(root))!;
+
+  const record = await loadDaemonRecord(root);
+  if (!record) {
+    throw new RevisError("Daemon failed to persist its runtime record");
+  }
+
+  return record;
 }
 
-/** Send one request to the daemon and wait for its socket response. */
-async function sendDaemonRequest(
-  socketPath: string,
-  notification: CommitNotification,
-  timeoutMs = SOCKET_REQUEST_TIMEOUT_MS
-): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    let settled = false;
-    const socket = net.createConnection(socketPath, () => {
-      socket.end(`${JSON.stringify(notification)}\n`);
-    });
-
-    let response = "";
-
-    const settle = (fn: () => void): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      fn();
-    };
-
-    socket.setTimeout(timeoutMs, () => {
-      socket.destroy();
-      settle(() =>
-        reject(new RevisError(`Timed out writing to daemon socket ${socketPath}`))
-      );
-    });
-
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk) => {
-      response += chunk;
-    });
-
-    socket.on("error", (error) => {
-      settle(() => reject(error));
-    });
-
-    socket.on("close", () => {
-      settle(() => resolve(response.trim()));
-    });
-  });
-}
-
-/** Ask the daemon to run an immediate sync cycle. */
+/** Ask the daemon to run an immediate reconcile cycle. */
 export async function notifyDaemon(
   root: string,
-  notification: CommitNotification
+  request: DaemonRequest
 ): Promise<void> {
   const socketPath = daemonSocketPath(root);
   if (!(await daemonSocketReady(socketPath))) {
     await ensureDaemonRunning(root);
   }
 
-  await sendDaemonRequest(socketPath, notification);
+  await sendDaemonRequest(socketPath, request);
 }
 
 /** Stop the daemon process when it is running. */
 export async function stopDaemon(root: string): Promise<void> {
+  if (!(await configExists(root))) {
+    return;
+  }
+
   const record = await loadDaemonRecord(root);
   if (!record) {
     await removeSocketPath(daemonSocketPath(root));
     return;
   }
 
-  if (await daemonSocketReady(record.socketPath)) {
+  if (record.socketPath && (await daemonSocketReady(record.socketPath))) {
     try {
       await sendDaemonRequest(
         record.socketPath,
@@ -236,24 +182,24 @@ export async function stopDaemon(root: string): Promise<void> {
       return;
     } catch {
       if (!daemonProcessAlive(record)) {
-        await removeSocketPath(record.socketPath);
+        if (record.socketPath) {
+          await removeSocketPath(record.socketPath);
+        }
         await deleteDaemonRecord(root);
         return;
       }
 
-      await terminateDaemonProcess(record.pid);
+      await terminateDaemonProcess(record.pid!);
     }
-
-    await removeSocketPath(record.socketPath);
-    await deleteDaemonRecord(root);
-    return;
   }
 
   if (daemonProcessAlive(record)) {
-    await terminateDaemonProcess(record.pid);
+    await terminateDaemonProcess(record.pid!);
   }
 
-  await removeSocketPath(record.socketPath);
+  if (record.socketPath) {
+    await removeSocketPath(record.socketPath);
+  }
   await deleteDaemonRecord(root);
 }
 
@@ -261,11 +207,11 @@ export async function stopDaemon(root: string): Promise<void> {
 export class RevisDaemon {
   readonly root: string;
   readonly config: RevisConfig;
+  readonly provider: WorkspaceProvider;
   readonly socketPath: string;
   readonly syncBranch: string;
 
-  private readonly operatorSlugPromise: Promise<string>;
-  private readonly pendingNotifications: CommitNotification[] = [];
+  private readonly pendingRequests: DaemonRequest[] = [];
   private server: net.Server | null = null;
   private interval: NodeJS.Timeout | null = null;
   private running = false;
@@ -277,19 +223,14 @@ export class RevisDaemon {
   constructor(root: string, config: RevisConfig) {
     this.root = root;
     this.config = config;
+    this.provider = createWorkspaceProvider(config);
     this.socketPath = daemonSocketPath(root);
-    this.syncBranch = syncTargetBranch(
-      config.coordinationRemote,
-      config.trunkBase
-    );
-    this.operatorSlugPromise = deriveOperatorSlug(root);
+    this.syncBranch = syncTargetBranch(config.coordinationRemote, config.trunkBase);
   }
 
-  /** Start serving hook notifications and periodic fetch cycles. */
+  /** Start serving control requests and periodic reconcile cycles. */
   async start(): Promise<void> {
     await ensureRuntime(this.root);
-
-    // Bind the local IPC endpoint before any workspace hooks can talk to us.
     await this.prepareSocket();
 
     this.server = net.createServer({ allowHalfOpen: true }, (socket) => {
@@ -304,7 +245,6 @@ export class RevisDaemon {
       });
     });
 
-    // Persist daemon liveness once the socket is definitely bound.
     await new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
       this.server!.listen(this.socketPath, () => {
@@ -314,11 +254,13 @@ export class RevisDaemon {
     });
 
     this.running = true;
+
     await writeDaemonRecord(this.root, {
-      pid: process.pid,
-      socketPath: this.socketPath,
+      sandboxProvider: this.config.sandboxProvider,
       syncTargetBranch: this.syncBranch,
-      startedAt: isoNow()
+      startedAt: isoNow(),
+      pid: process.pid,
+      socketPath: this.socketPath
     });
     await appendEvent(this.root, {
       timestamp: isoNow(),
@@ -328,17 +270,8 @@ export class RevisDaemon {
 
     await this.baselineStartupState();
 
-    // Start the periodic fetch loop and immediately process startup recovery.
-    this.interval = setInterval(() => {
-      this.pendingNotifications.push({
-        type: "sync",
-        reason: "poll"
-      });
-      this.queueSync();
-    }, this.config.remotePollSeconds * 1000);
-
-    this.pendingNotifications.push({
-      type: "sync",
+    this.pendingRequests.push({
+      type: "reconcile",
       reason: "startup"
     });
     this.queueSync();
@@ -347,6 +280,14 @@ export class RevisDaemon {
     if (process.env.REVIS_DAEMON_READY_STDOUT === "1") {
       process.stdout.write(`${DAEMON_READY_LINE}\n`);
     }
+
+    this.interval = setInterval(() => {
+      this.pendingRequests.push({
+        type: "reconcile",
+        reason: "poll"
+      });
+      this.queueSync();
+    }, this.config.remotePollSeconds * 1000);
   }
 
   /** Stop accepting events and clean up the socket path. */
@@ -414,13 +355,10 @@ export class RevisDaemon {
     }
   }
 
-  /** Parse daemon socket messages and dispatch them to the right control path. */
-  private async handleSocketMessages(
-    socket: net.Socket,
-    buffer: string
-  ): Promise<void> {
+  /** Parse control socket messages and dispatch them to the right control path. */
+  private async handleSocketMessages(socket: net.Socket, buffer: string): Promise<void> {
     try {
-      const messages = parseSocketNotifications(buffer);
+      const messages = parseSocketRequests(buffer);
 
       if (messages.some((message) => message.type === "shutdown")) {
         await this.stop();
@@ -430,8 +368,8 @@ export class RevisDaemon {
         return;
       }
 
-      for (const notification of messages) {
-        this.pendingNotifications.push(notification);
+      for (const message of messages) {
+        this.pendingRequests.push(message);
         this.queueSync();
       }
       socket.end();
@@ -453,7 +391,7 @@ export class RevisDaemon {
 
   /** Wait until the daemon drains every pending sync request. */
   private async waitForIdle(): Promise<void> {
-    if (!this.syncInFlight && this.pendingNotifications.length === 0) {
+    if (!this.syncInFlight && this.pendingRequests.length === 0) {
       return;
     }
 
@@ -465,9 +403,9 @@ export class RevisDaemon {
   /** Drain the coalesced sync queue until no more work remains. */
   private async drainSyncQueue(): Promise<void> {
     try {
-      while (this.pendingNotifications.length > 0) {
-        await this.processNotification(this.pendingNotifications.shift()!);
-        if (!this.syncQueued && this.pendingNotifications.length === 0) {
+      while (this.pendingRequests.length > 0) {
+        await this.processRequest(this.pendingRequests.shift()!);
+        if (!this.syncQueued && this.pendingRequests.length === 0) {
           break;
         }
         this.syncQueued = false;
@@ -479,12 +417,10 @@ export class RevisDaemon {
     }
   }
 
-  /** Run one queued notification and persist daemon failures when it crashes. */
-  private async processNotification(
-    notification: CommitNotification
-  ): Promise<void> {
+  /** Run one queued request and persist daemon failures when it crashes. */
+  private async processRequest(request: DaemonRequest): Promise<void> {
     try {
-      await this.runSyncCycle({ notification });
+      await this.runSyncCycle({ request });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : `Unknown daemon error: ${String(error)}`;
@@ -492,28 +428,30 @@ export class RevisDaemon {
     }
   }
 
-  /** Run one full daemon cycle: fetch, rebase, push, relay, persist. */
+  /** Run one full daemon cycle. */
   private async runSyncCycle(reason: DaemonCycleReason): Promise<void> {
     const cycle = await this.loadCycleState();
-    await this.syncOwnedBranches(cycle);
-    await this.relayVisibleHeads(cycle);
+
+    for (const record of cycle.workspaces) {
+      await this.reconcileWorkspace(record, cycle.targetSha);
+    }
+
     await this.recordSuccessfulCycle(cycle.daemonRecord, reason);
   }
 
-  /** Refresh workspace records and pane snapshots before a sync cycle. */
-  private async refreshWorkspaces(): Promise<WorkspaceRecord[]> {
-    return refreshWorkspaceSnapshots(
-      this.root,
-      await loadWorkspaceRecords(this.root)
-    );
-  }
-
-  /** Snapshot the current local and remote heads so startup ignores older history. */
+  /** Snapshot current workspace git state so the daemon starts from truth, not assumptions. */
   private async baselineStartupState(): Promise<void> {
     const workspaces = await loadWorkspaceRecords(this.root);
-
     for (const record of workspaces) {
-      await this.baselineWorkspaceRecord(record);
+      if (record.state === "stopped") {
+        continue;
+      }
+
+      await this.refreshWorkspaceGitState(record);
+      const status = await this.provider.inspectSession(record);
+      record.state = status.phase === "running" ? "active" : "starting";
+      await writeWorkspaceRecord(this.root, record);
+      await captureWorkspaceActivity(this.root, record, this.provider);
     }
 
     await fetchCoordinationRefs(
@@ -523,32 +461,18 @@ export class RevisDaemon {
     );
 
     const daemonRecord = await this.requireDaemonRecord();
-    daemonRecord.lastSyncTargetSha = (
-      await gitClient(this.root).revparse([
-        remoteTrackingRef(this.config.coordinationRemote, this.syncBranch)
-      ])
-    ).trim();
+    daemonRecord.lastSyncTargetSha = await this.currentSyncTargetSha();
     await writeDaemonRecord(this.root, daemonRecord);
-
-    await writeRelayRegistry(this.root, {
-      byBranch: Object.fromEntries(
-        (await listRemoteWorkspaceHeads(this.root, this.config.coordinationRemote)).map(
-          (head) => [head.branch, head.sha]
-        )
-      )
-    });
   }
 
   /** Load the data needed for one daemon sync cycle. */
   private async loadCycleState(): Promise<{
     daemonRecord: DaemonRecord;
-    operatorSlug: string;
     targetSha: string;
     workspaces: WorkspaceRecord[];
   }> {
     const daemonRecord = await this.requireDaemonRecord();
-    const operatorSlug = await this.operatorSlugPromise;
-    const workspaces = await this.refreshWorkspaces();
+    const workspaces = await loadWorkspaceRecords(this.root);
 
     await fetchCoordinationRefs(
       this.root,
@@ -556,46 +480,246 @@ export class RevisDaemon {
       this.syncBranch
     );
 
-    const targetSha = (
-      await gitClient(this.root).revparse([
-        remoteTrackingRef(this.config.coordinationRemote, this.syncBranch)
-      ])
-    ).trim();
-
     return {
       daemonRecord,
-      operatorSlug,
-      targetSha,
+      targetSha: await this.currentSyncTargetSha(),
       workspaces
     };
   }
 
-  /** Rebase owned workspaces and publish their branches for one sync cycle. */
-  private async syncOwnedBranches(cycle: {
-    daemonRecord: DaemonRecord;
-    targetSha: string;
-    workspaces: WorkspaceRecord[];
-  }): Promise<void> {
-    if (cycle.daemonRecord.lastSyncTargetSha !== cycle.targetSha) {
-      await this.rebaseOwnedWorkspaces(cycle.workspaces, cycle.targetSha);
-      cycle.daemonRecord.lastSyncTargetSha = cycle.targetSha;
+  /** Reconcile one workspace against the current iteration lifecycle rules. */
+  private async reconcileWorkspace(
+    record: WorkspaceRecord,
+    targetSha: string
+  ): Promise<void> {
+    if (record.state === "stopped") {
+      return;
     }
 
-    await this.pushOwnedBranches(cycle.workspaces);
-    await fetchCoordinationRefs(
-      this.root,
+    const sessionStatus = await this.inspectWorkspaceSession(record);
+    if (sessionStatus.phase === "running") {
+      await this.reconcileRunningWorkspace(record);
+      return;
+    }
+
+    await this.prepareWorkspaceForRestart(record, sessionStatus.exitCode);
+
+    const rebaseBlocked = await this.syncWorkspaceBeforeRestart(record, targetSha);
+    if (rebaseBlocked) {
+      return;
+    }
+
+    await this.startNextIteration(record);
+  }
+
+  /** Persist one exited iteration before the next sync/restart step begins. */
+  private async recordIterationExit(
+    record: WorkspaceRecord,
+    exitCode?: number
+  ): Promise<void> {
+    record.lastExitedAt = isoNow();
+    if (exitCode === undefined) {
+      delete record.lastExitCode;
+    } else {
+      record.lastExitCode = exitCode;
+    }
+    record.state = "starting";
+    delete record.currentSessionId;
+    delete record.lastError;
+    await writeWorkspaceRecord(this.root, record);
+
+    const codeSuffix = exitCode === undefined ? "unknown exit status" : `exit ${exitCode}`;
+    await appendEvent(this.root, {
+      timestamp: isoNow(),
+      type: "iteration_exited",
+      agentId: record.agentId,
+      branch: record.coordinationBranch,
+      summary: `${record.agentId} iteration ${record.iteration} exited with ${codeSuffix}`,
+      ...(exitCode === undefined ? {} : { metadata: { exitCode } })
+    });
+  }
+
+  /** Capture activity and inspect the current workspace session. */
+  private async inspectWorkspaceSession(record: WorkspaceRecord) {
+    const sessionStatus = await this.provider.inspectSession(record);
+    await captureWorkspaceActivity(this.root, record, this.provider);
+    return sessionStatus;
+  }
+
+  /** Keep runtime metadata aligned with an actively running workspace. */
+  private async reconcileRunningWorkspace(record: WorkspaceRecord): Promise<void> {
+    await this.refreshWorkspaceGitState(record);
+    record.state = "active";
+    delete record.lastError;
+    await writeWorkspaceRecord(this.root, record);
+  }
+
+  /** Persist exit or blocked-start state before the next sync step. */
+  private async prepareWorkspaceForRestart(
+    record: WorkspaceRecord,
+    exitCode?: number
+  ): Promise<void> {
+    if (record.currentSessionId) {
+      await this.recordIterationExit(record, exitCode);
+      return;
+    }
+
+    record.state = record.rebaseRequiredSha ? "failed" : "starting";
+    await writeWorkspaceRecord(this.root, record);
+  }
+
+  /** Refresh the workspace's current branch and HEAD SHA from its repository. */
+  private async refreshWorkspaceGitState(record: WorkspaceRecord): Promise<void> {
+    record.localBranch = await workspaceCurrentBranch(this.provider, record);
+    record.lastCommitSha = await workspaceHeadSha(this.provider, record);
+  }
+
+  /** Refresh git state, publish HEAD, and fetch refs before the next restart. */
+  private async syncWorkspaceBeforeRestart(
+    record: WorkspaceRecord,
+    targetSha: string
+  ): Promise<boolean> {
+    await this.refreshWorkspaceGitState(record);
+    await this.publishWorkspaceHead(record);
+    await this.fetchWorkspaceRefs(record);
+    return this.reconcileWorkspaceRebase(record, targetSha);
+  }
+
+  /** Push the current workspace HEAD to its coordination ref when needed. */
+  private async publishWorkspaceHead(record: WorkspaceRecord): Promise<void> {
+    const pushedSha = await pushWorkspaceHead(
+      this.provider,
+      record,
+      this.config.coordinationRemote
+    );
+    const changed = record.lastPushedSha !== pushedSha;
+
+    record.lastPushedSha = pushedSha;
+    record.lastCommitSha = pushedSha;
+    await writeWorkspaceRecord(this.root, record);
+
+    if (!changed) {
+      return;
+    }
+
+    const subject = await workspaceHeadSubject(this.provider, record);
+    await appendEvent(this.root, {
+      timestamp: isoNow(),
+      type: "branch_pushed",
+      agentId: record.agentId,
+      branch: record.coordinationBranch,
+      sha: pushedSha,
+      summary: `${record.agentId} pushed ${pushedSha.slice(0, 8)}: ${subject}`
+    });
+  }
+
+  /** Fetch sync-target and coordination refs into the workspace before restart. */
+  private async fetchWorkspaceRefs(record: WorkspaceRecord): Promise<void> {
+    await fetchWorkspaceCoordinationRefs(
+      this.provider,
+      record,
       this.config.coordinationRemote,
       this.syncBranch
     );
+
+    record.lastSeenRemoteSha = await this.currentSyncTargetSha();
+    await writeWorkspaceRecord(this.root, record);
   }
 
-  /** Relay every unseen remote head into the relevant local workspaces. */
-  private async relayVisibleHeads(cycle: {
-    operatorSlug: string;
-    workspaces: WorkspaceRecord[];
-  }): Promise<void> {
-    const registry = await loadRelayRegistry(this.root);
-    await this.relayNewHeads(cycle.workspaces, registry, cycle.operatorSlug);
+  /** Rebase between iterations, blocking restart when the workspace is dirty or conflicted. */
+  private async reconcileWorkspaceRebase(
+    record: WorkspaceRecord,
+    targetSha: string
+  ): Promise<boolean> {
+    const needsRebase =
+      record.rebaseRequiredSha !== undefined || record.lastRebasedOntoSha !== targetSha;
+    if (!needsRebase) {
+      return false;
+    }
+
+    if (await workspaceWorkingTreeDirty(this.provider, record)) {
+      record.rebaseRequiredSha = targetSha;
+      record.state = "failed";
+      delete record.lastError;
+      await writeWorkspaceRecord(this.root, record);
+      await appendEvent(this.root, {
+        timestamp: isoNow(),
+        type: "workspace_rebase_pending",
+        agentId: record.agentId,
+        branch: record.coordinationBranch,
+        summary: `${record.agentId} needs rebase onto ${this.syncBranch} ${targetSha.slice(0, 8)}`
+      });
+      return true;
+    }
+
+    const rebaseError = await rebaseWorkspaceOntoSyncTarget(
+      this.provider,
+      record,
+      this.config.coordinationRemote,
+      this.syncBranch
+    );
+    if (rebaseError) {
+      record.rebaseRequiredSha = targetSha;
+      record.state = "failed";
+      record.lastError = rebaseError;
+      await writeWorkspaceRecord(this.root, record);
+      await appendEvent(this.root, {
+        timestamp: isoNow(),
+        type: "workspace_rebase_failed",
+        agentId: record.agentId,
+        branch: record.coordinationBranch,
+        summary: `${record.agentId} failed to rebase onto ${this.syncBranch}`
+      });
+      return true;
+    }
+
+    record.lastCommitSha = await workspaceHeadSha(this.provider, record);
+    record.lastRebasedOntoSha = targetSha;
+    delete record.rebaseRequiredSha;
+    delete record.lastError;
+    await writeWorkspaceRecord(this.root, record);
+    await appendEvent(this.root, {
+      timestamp: isoNow(),
+      type: "workspace_rebased",
+      agentId: record.agentId,
+      branch: record.coordinationBranch,
+      summary: `${record.agentId} rebased onto ${this.syncBranch} ${targetSha.slice(0, 8)}`
+    });
+    return false;
+  }
+
+  /** Start the next agent session after sync and pre-restart rebase complete. */
+  private async startNextIteration(record: WorkspaceRecord): Promise<void> {
+    record.state = "starting";
+    await writeWorkspaceRecord(this.root, record);
+
+    const nextIteration = record.iteration + 1;
+    const sessionId = await this.provider.startSession(record);
+    record.iteration = nextIteration;
+    record.currentSessionId = sessionId;
+    record.lastStartedAt = isoNow();
+    delete record.lastError;
+
+    if (nextIteration > 1) {
+      await appendEvent(this.root, {
+        timestamp: isoNow(),
+        type: "workspace_restarted",
+        agentId: record.agentId,
+        branch: record.coordinationBranch,
+        summary: `${record.agentId} restarted iteration ${nextIteration}`
+      });
+    }
+
+    await appendEvent(this.root, {
+      timestamp: isoNow(),
+      type: "iteration_started",
+      agentId: record.agentId,
+      branch: record.coordinationBranch,
+        summary: `${record.agentId} started iteration ${nextIteration}`
+    });
+
+    record.state = "active";
+    await writeWorkspaceRecord(this.root, record);
   }
 
   /** Persist daemon success markers once one sync cycle completes. */
@@ -605,13 +729,14 @@ export class RevisDaemon {
   ): Promise<void> {
     daemonRecord.lastFetchAt = isoNow();
     daemonRecord.lastEventAt = isoNow();
+    daemonRecord.lastSyncTargetSha = await this.currentSyncTargetSha();
     delete daemonRecord.lastError;
     await writeDaemonRecord(this.root, daemonRecord);
 
     await appendEvent(this.root, {
       timestamp: isoNow(),
-      type: "remote_branch_seen",
-      summary: `Daemon cycle completed (${describeNotification(reason.notification)})`
+      type: "remote_refs_fetched",
+      summary: `Daemon cycle completed (${describeRequest(reason.request)})`
     });
   }
 
@@ -623,257 +748,9 @@ export class RevisDaemon {
     await writeDaemonRecord(this.root, record);
     await appendEvent(this.root, {
       timestamp: isoNow(),
-      type: "remote_branch_seen",
+      type: "remote_refs_fetched",
       summary: `Daemon cycle failed: ${message}`
     });
-  }
-
-  /** Rebase each owned workspace onto the current sync target when it advances. */
-  private async rebaseOwnedWorkspaces(
-    workspaces: WorkspaceRecord[],
-    targetSha: string
-  ): Promise<void> {
-    for (const record of workspaces) {
-      if (record.state === "stopped") {
-        continue;
-      }
-
-      await assertWorkspaceRepoExists(record);
-      const dirty = !(await gitClient(record.repoPath).status()).isClean();
-      if (dirty) {
-        await this.markWorkspaceRebasePending(record, targetSha);
-        continue;
-      }
-
-      const rebaseError = await this.rebaseWorkspace(record);
-      if (rebaseError) {
-        await this.markWorkspaceRebaseFailed(record, targetSha, rebaseError);
-        continue;
-      }
-
-      await this.markWorkspaceRebased(record, targetSha);
-    }
-  }
-
-  /** Push each owned branch so other operators can see local commits. */
-  private async pushOwnedBranches(workspaces: WorkspaceRecord[]): Promise<void> {
-    for (const record of workspaces) {
-      if (record.state === "stopped") {
-        continue;
-      }
-
-      await assertWorkspaceRepoExists(record);
-      const headSha = await currentHeadSha(record.repoPath);
-      record.lastCommitSha = headSha;
-
-      if (record.lastPushedSha === headSha) {
-        await writeWorkspaceRecord(this.root, record);
-        continue;
-      }
-
-      const pushedSha = await pushBranch(
-        record.repoPath,
-        this.config.coordinationRemote,
-        "HEAD",
-        record.coordinationBranch
-      );
-      const summary = await commitSummaryForRef(
-        record.repoPath,
-        "HEAD",
-        record.coordinationBranch
-      );
-      record.lastPushedSha = pushedSha;
-      record.lastCommitSha = pushedSha;
-      delete record.lastError;
-      await writeWorkspaceRecord(this.root, record);
-      await appendEvent(this.root, {
-        timestamp: isoNow(),
-        type: "branch_pushed",
-        agentId: record.agentId,
-        branch: record.coordinationBranch,
-        sha: pushedSha,
-        summary: `${record.agentId} pushed ${summary.shortSha}: ${summary.subject}`,
-        metadata: {
-          shortstat: summary.shortstat
-        }
-      });
-    }
-  }
-
-  /** Relay unseen remote heads into local workspace sessions. */
-  private async relayNewHeads(
-    workspaces: WorkspaceRecord[],
-    registry: RelayRegistry,
-    operatorSlug: string
-  ): Promise<void> {
-    const heads = await listRemoteWorkspaceHeads(
-      this.root,
-      this.config.coordinationRemote
-    );
-
-    for (const head of heads) {
-      await this.processRemoteHead(workspaces, registry, operatorSlug, head);
-    }
-
-    await writeRelayRegistry(this.root, registry);
-  }
-
-  /** Deliver one commit summary to the correct local workspace fan-out. */
-  private async relayCommitSummary(
-    workspaces: WorkspaceRecord[],
-    summary: CommitSummary,
-    localOperatorSlug: string
-  ): Promise<void> {
-    const localBranch = summary.operatorSlug === localOperatorSlug;
-    const destinations = workspaces.filter((record) => {
-      if (!localBranch) {
-        return true;
-      }
-
-      return record.coordinationBranch !== summary.branch;
-    });
-
-    const message = this.formatCommitRelay(summary);
-    for (const record of destinations) {
-      await this.fetchRelayBranch(record, summary.branch);
-      const deliveryMode = await sendSteeringMessage(this.root, record, message);
-      await appendEvent(this.root, {
-        timestamp: isoNow(),
-        type: "relay_received",
-        agentId: record.agentId,
-        branch: record.coordinationBranch,
-        sha: summary.sha,
-        sourceAgentId: summary.agentId,
-        sourceBranch: summary.branch,
-        destinationAgentId: record.agentId,
-        destinationBranch: record.coordinationBranch,
-        deliveryMode,
-        summary: `${record.agentId} received ${summary.shortSha} from ${summary.operatorSlug}/${summary.agentId}`
-      });
-    }
-
-    await appendEvent(this.root, {
-      timestamp: isoNow(),
-      type: "commit_relayed",
-      agentId: summary.agentId,
-      branch: summary.branch,
-      sha: summary.sha,
-      sourceAgentId: summary.agentId,
-      sourceBranch: summary.branch,
-      summary: `Relayed ${summary.shortSha} from ${summary.operatorSlug}/${summary.agentId}`
-    });
-  }
-
-  /** Format the single-line steering message for one commit. */
-  private formatCommitRelay(summary: CommitSummary): string {
-    return `[revis] ${summary.shortSha} ${summary.operatorSlug}/${summary.agentId}: ${summary.subject} (${summary.shortstat})`;
-  }
-
-  /** Fetch the relayed coordination branch into one workspace clone before fan-out. */
-  private async fetchRelayBranch(
-    record: WorkspaceRecord,
-    branch: string
-  ): Promise<void> {
-    await assertWorkspaceRepoExists(record);
-    await fetchRemoteRefs(record.repoPath, this.config.coordinationRemote, [branch]);
-  }
-
-  /** Rebase one clean workspace branch onto the fetched sync target. */
-  private async rebaseWorkspace(record: WorkspaceRecord): Promise<string | null> {
-    await fetchRemoteRefs(record.repoPath, this.config.coordinationRemote, [
-      this.syncBranch
-    ]);
-    const result = await runCommand(
-      [
-        "git",
-        "rebase",
-        `${this.config.coordinationRemote}/${this.syncBranch}`
-      ],
-      {
-        cwd: record.repoPath,
-        check: false
-      }
-    );
-    if (result.exitCode === 0) {
-      return null;
-    }
-
-    const rebaseError = commandFailureMessage(result, "rebase failed");
-    const abortError = await abortRebase(record.repoPath);
-    if (!abortError) {
-      return rebaseError;
-    }
-
-    return `${rebaseError}; ${abortError}`;
-  }
-
-  /** Persist and broadcast the pending-rebase state for one dirty workspace. */
-  private async markWorkspaceRebasePending(
-    record: WorkspaceRecord,
-    targetSha: string
-  ): Promise<void> {
-    record.rebaseRequiredSha = targetSha;
-    delete record.lastError;
-    await this.persistRebaseOutcome(
-      record,
-      "workspace_rebase_pending",
-      `${record.agentId} needs rebase onto ${this.syncBranch} ${targetSha.slice(0, 8)}`,
-      `[revis] ${this.syncBranch} advanced to ${targetSha.slice(0, 8)}. Your workspace is dirty, so rebase is pending.`
-    );
-  }
-
-  /** Persist and broadcast one automatic rebase failure. */
-  private async markWorkspaceRebaseFailed(
-    record: WorkspaceRecord,
-    targetSha: string,
-    message: string
-  ): Promise<void> {
-    record.rebaseRequiredSha = targetSha;
-    record.lastError = message;
-    await this.persistRebaseOutcome(
-      record,
-      "workspace_rebase_failed",
-      `${record.agentId} failed to rebase onto ${this.syncBranch}`,
-      `[revis] ${this.syncBranch} advanced to ${targetSha.slice(0, 8)}, but automatic rebase failed: ${record.lastError}`
-    );
-  }
-
-  /** Persist and broadcast one successful automatic rebase. */
-  private async markWorkspaceRebased(
-    record: WorkspaceRecord,
-    targetSha: string
-  ): Promise<void> {
-    record.lastCommitSha = await currentHeadSha(record.repoPath);
-    record.lastRebasedOntoSha = targetSha;
-    delete record.rebaseRequiredSha;
-    delete record.lastError;
-    await this.persistRebaseOutcome(
-      record,
-      "workspace_rebased",
-      `${record.agentId} rebased onto ${this.syncBranch} ${targetSha.slice(0, 8)}`,
-      `[revis] Rebasing complete. ${record.agentId} now sits on ${this.syncBranch} ${targetSha.slice(0, 8)}.`
-    );
-  }
-
-  /** Persist and broadcast one rebase outcome after the record is updated in-memory. */
-  private async persistRebaseOutcome(
-    record: WorkspaceRecord,
-    type:
-      | "workspace_rebase_pending"
-      | "workspace_rebase_failed"
-      | "workspace_rebased",
-    summary: string,
-    message: string
-  ): Promise<void> {
-    await writeWorkspaceRecord(this.root, record);
-    await appendEvent(this.root, {
-      timestamp: isoNow(),
-      type,
-      agentId: record.agentId,
-      branch: record.coordinationBranch,
-      summary
-    });
-    await sendSteeringMessage(this.root, record, message);
   }
 
   /** Load the persisted daemon record or fail loudly when it is missing. */
@@ -886,59 +763,9 @@ export class RevisDaemon {
     return record;
   }
 
-  /** Sync one fetched remote head into local runtime state and relay fan-out. */
-  private async processRemoteHead(
-    workspaces: WorkspaceRecord[],
-    registry: RelayRegistry,
-    operatorSlug: string,
-    head: { branch: string; sha: string }
-  ): Promise<void> {
-    const record = workspaces.find(
-      (workspace) => workspace.coordinationBranch === head.branch
-    );
-    if (record) {
-      record.lastSeenRemoteSha = head.sha;
-      await writeWorkspaceRecord(this.root, record);
-    }
-
-    if (registry.byBranch[head.branch] === head.sha) {
-      return;
-    }
-
-    const summary = await commitSummaryForRef(
-      this.root,
-      remoteTrackingRef(this.config.coordinationRemote, head.branch),
-      head.branch
-    );
-    await this.relayCommitSummary(workspaces, summary, operatorSlug);
-
-    registry.byBranch[head.branch] = head.sha;
-    if (record) {
-      record.lastRelayedSha = head.sha;
-      await writeWorkspaceRecord(this.root, record);
-      await writeLastRelayedSha(record.repoPath, head.sha);
-    }
-  }
-
-  /** Capture the current workspace state as the daemon's startup baseline. */
-  private async baselineWorkspaceRecord(record: WorkspaceRecord): Promise<void> {
-    if (!(await pathExists(record.repoPath))) {
-      return;
-    }
-
-    const headSha = await currentHeadSha(record.repoPath);
-
-    record.localBranch = await currentBranch(record.repoPath);
-    record.lastCommitSha = headSha;
-    record.lastPushedSha = headSha;
-    record.lastRelayedSha = headSha;
-    record.lastSeenRemoteSha = headSha;
-    delete record.rebaseRequiredSha;
-    delete record.queuedSteeringMessages;
-    delete record.lastError;
-
-    await writeWorkspaceRecord(this.root, record);
-    await writeLastRelayedSha(record.repoPath, headSha);
+  /** Return the current fetched sync-target SHA from the operator root. */
+  private async currentSyncTargetSha(): Promise<string> {
+    return (await gitClient(this.root).revparse([`${this.config.coordinationRemote}/${this.syncBranch}`])).trim();
   }
 }
 
@@ -948,75 +775,75 @@ export async function runDaemonProcess(root: string): Promise<void> {
   await daemon.runForever();
 }
 
-/** Parse every newline-delimited daemon notification from one socket payload. */
-function parseSocketNotifications(buffer: string): CommitNotification[] {
+/** Send one request to the daemon and wait for its socket response. */
+async function sendDaemonRequest(
+  socketPath: string,
+  request: DaemonRequest,
+  timeoutMs = SOCKET_REQUEST_TIMEOUT_MS
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const socket = net.createConnection(socketPath, () => {
+      socket.end(`${JSON.stringify(request)}\n`);
+    });
+
+    let response = "";
+
+    const settle = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      fn();
+    };
+
+    socket.setTimeout(timeoutMs, () => {
+      socket.destroy();
+      settle(() =>
+        reject(new RevisError(`Timed out writing to daemon socket ${socketPath}`))
+      );
+    });
+
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      response += chunk;
+    });
+
+    socket.on("error", (error) => {
+      settle(() => reject(error));
+    });
+
+    socket.on("close", () => {
+      settle(() => resolve(response.trim()));
+    });
+  });
+}
+
+/** Parse every newline-delimited daemon request from one socket payload. */
+function parseSocketRequests(buffer: string): DaemonRequest[] {
   return buffer
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => validateNotification(JSON.parse(line) as CommitNotification));
+    .map((line) => validateRequest(JSON.parse(line) as DaemonRequest));
 }
 
-/** Validate one daemon notification instead of normalizing malformed payloads. */
-function validateNotification(notification: CommitNotification): CommitNotification {
-  if (notification.type === "commit") {
-    if (!notification.agentId || !notification.sha) {
-      throw new RevisError("Commit notifications must include agentId and sha");
+/** Validate one daemon request instead of normalizing malformed payloads. */
+function validateRequest(request: DaemonRequest): DaemonRequest {
+  if (request.type === "reconcile" || request.type === "shutdown") {
+    if (!request.reason) {
+      throw new RevisError(`${request.type} requests must include reason`);
     }
 
-    return notification;
+    return request;
   }
 
-  if (notification.type === "sync" || notification.type === "shutdown") {
-    if (!notification.reason) {
-      throw new RevisError(`${notification.type} notifications must include reason`);
-    }
-
-    return notification;
-  }
-
-  throw new RevisError(`Unsupported daemon notification type: ${String(notification.type)}`);
+  throw new RevisError(`Unsupported daemon request type: ${String(request.type)}`);
 }
 
-/** Describe one validated daemon notification for the event log. */
-function describeNotification(notification: CommitNotification): string {
-  if (notification.type === "commit") {
-    return `${notification.agentId!} committed`;
-  }
-
-  return notification.reason!;
-}
-
-/** Require the on-disk workspace repo for one live runtime record. */
-async function assertWorkspaceRepoExists(record: WorkspaceRecord): Promise<void> {
-  if (await pathExists(record.repoPath)) {
-    return;
-  }
-
-  throw new RevisError(
-    `Workspace ${record.agentId} is ${record.state} but repo is missing: ${record.repoPath}`
-  );
-}
-
-/** Convert one failed command into the operator-facing error text. */
-function commandFailureMessage(
-  result: { stderr: string; stdout: string },
-  fallback: string
-): string {
-  return result.stderr.trim() || result.stdout.trim() || fallback;
-}
-
-/** Abort a failed rebase and surface cleanup errors when they happen. */
-async function abortRebase(repoPath: string): Promise<string | null> {
-  const abort = await runCommand(["git", "rebase", "--abort"], {
-    cwd: repoPath,
-    check: false
-  });
-  if (abort.exitCode === 0) {
-    return null;
-  }
-
-  return commandFailureMessage(abort, "git rebase --abort failed");
+/** Describe one validated daemon request for the event log. */
+function describeRequest(request: DaemonRequest): string {
+  return request.reason!;
 }
 
 /** Terminate one daemon process when graceful shutdown is unavailable. */
@@ -1065,7 +892,9 @@ async function waitForDaemonShutdown(record: DaemonRecord): Promise<void> {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < PROCESS_STOP_TIMEOUT_MS) {
-    const socketReady = await daemonSocketReady(record.socketPath);
+    const socketReady = record.socketPath
+      ? await daemonSocketReady(record.socketPath)
+      : false;
     if (!socketReady && !daemonProcessAlive(record)) {
       return;
     }
@@ -1073,25 +902,7 @@ async function waitForDaemonShutdown(record: DaemonRecord): Promise<void> {
     await sleep(50);
   }
 
-  if (daemonProcessAlive(record)) {
+  if (record.pid && daemonProcessAlive(record)) {
     await terminateDaemonProcess(record.pid);
-  }
-}
-
-/** Return whether one process id still exists. */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") {
-      return false;
-    }
-    if (code === "EPERM") {
-      return true;
-    }
-
-    throw error;
   }
 }

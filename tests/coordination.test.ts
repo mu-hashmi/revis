@@ -1,28 +1,42 @@
+import { join } from "node:path";
+
 import { pathExists } from "../src/core/files";
-import { daemonSocketPath } from "../src/core/ipc";
 import { runCommand } from "../src/core/process";
-import { daemonSocketReady } from "../src/coordination/daemon";
-import { loadWorkspaceRecords } from "../src/coordination/runtime";
-import { createWorkspaces, tmuxSessionExists } from "../src/coordination/workspaces";
+import { daemonSocketReady, notifyDaemon } from "../src/coordination/daemon";
+import { createWorkspaces, stopWorkspaces } from "../src/coordination/workspaces";
+import { loadEvents } from "../src/coordination/runtime";
 import {
   cleanupRepo,
   commitWorkspaceChange,
   createCleanupStack,
-  createWorkspaceHarness,
   createSharedRemote,
+  createWorkspaceHarness,
+  exitWorkspaceSession,
   initializeRevis,
+  killWorkspaceSession,
+  readText,
+  requireWorkspaceRecord,
   startTestDaemon,
-  waitFor
+  waitFor,
+  waitForWorkspaceRecord
 } from "./helpers";
+
+const LONG_RUNNING_EXEC = "sleep 30";
+const STARTUP_REMOTE_SHA_FILE = ".startup-remote-sha";
+const BOB_REMOTE_PROBE_EXEC = [
+  `git rev-parse --verify --quiet origin/revis/alice/agent-1/work > ${STARTUP_REMOTE_SHA_FILE} 2>/dev/null || true`,
+  "sleep 30"
+].join("; ");
 
 describe("workspace coordination", () => {
   const cleanups = createCleanupStack();
 
   afterEach(cleanups.drain);
 
-  test("creates namespaced branches, hooks, tmux sessions, and a daemon socket", async () => {
+  test("creates namespaced branches, persists exec commands, and starts iteration 1", async () => {
     const { daemon, root, workspaces } = await createWorkspaceHarness({
       count: 2,
+      execCommand: LONG_RUNNING_EXEC,
       user: {
         userName: "Alice Example",
         userEmail: "alice@example.com"
@@ -38,296 +52,418 @@ describe("workspace coordination", () => {
       "revis/alice/agent-1/work",
       "revis/alice/agent-2/work"
     ]);
-    expect(
-      await pathExists(`${workspaces[0]!.repoPath}/.git/hooks/post-commit`)
-    ).toBe(true);
-    expect(await tmuxSessionExists(workspaces[0]!.tmuxSession)).toBe(true);
+    expect(workspaces.map((workspace) => workspace.execCommand)).toEqual([
+      LONG_RUNNING_EXEC,
+      LONG_RUNNING_EXEC
+    ]);
+
+    const record = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) =>
+        workspace.iteration === 1 &&
+        workspace.state === "active" &&
+        workspace.currentSessionId !== undefined
+    );
+
+    expect(record.execCommand).toBe(LONG_RUNNING_EXEC);
+    expect(await pathExists(join(record.workspaceRoot, "..", "session.log"))).toBe(true);
     expect(await daemonSocketReady(daemon!.socketPath)).toBe(true);
   });
 
-  test("relays local post-commit updates to the other workspace", async () => {
+  test(
+    "normal session exit pushes HEAD and starts the next iteration",
+    async () => {
     const { daemon, root, workspaces } = await createWorkspaceHarness({
-      count: 2,
-      user: {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      }
-    });
-    cleanups.add(() => cleanupRepo(root, daemon));
-
-    const sha = await commitWorkspaceChange(
-      workspaces[0]!.repoPath,
-      "agent one update"
-    );
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return (
-        records
-          .find((record) => record.agentId === "agent-2")
-          ?.queuedSteeringMessages?.some(
-            (line) =>
-              line.includes(sha.slice(0, 8)) && line.includes("agent one update")
-          ) ?? false
-      );
-    });
-
-    await waitFor(async () => {
-      const result = await runCommand(
-        ["git", "rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
-        {
-          cwd: workspaces[1]!.repoPath,
-          check: false
-        }
-      );
-      return result.exitCode === 0 && result.stdout.trim() === sha;
-    });
-
-    const records = await loadWorkspaceRecords(root);
-    expect(records.find((record) => record.agentId === "agent-1")?.lastRelayedSha).toBe(
-      sha
-    );
-  });
-
-  test("daemon startup ignores commits that existed before it began running", async () => {
-    const { root, workspaces } = await createWorkspaceHarness({
       count: 1,
-      startDaemon: false,
+      execCommand: LONG_RUNNING_EXEC,
       user: {
         userName: "Alice Example",
         userEmail: "alice@example.com"
       }
     });
-
-    const oldSha = await commitWorkspaceChange(
-      workspaces[0]!.repoPath,
-      "commit before daemon start"
-    );
-
-    const daemon = await startTestDaemon(root);
     cleanups.add(() => cleanupRepo(root, daemon));
 
-    const missingRef = await runCommand(
-      [
+    const initial = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) => workspace.iteration === 1 && workspace.state === "active"
+    );
+    const sha = await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "normal exit push");
+
+    await exitWorkspaceSession(initial);
+
+    const restarted = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) =>
+        workspace.iteration >= 2 &&
+        workspace.state === "active" &&
+        workspace.lastPushedSha === sha &&
+        workspace.lastExitedAt !== undefined &&
+        workspace.currentSessionId !== undefined &&
+        workspace.currentSessionId !== initial.currentSessionId,
+      15_000
+    );
+
+    expect(restarted.lastCommitSha).toBe(sha);
+
+    const events = await loadEvents(root);
+    expect(events.some((event) => event.type === "iteration_exited")).toBe(true);
+    expect(
+      events.some((event) => event.type === "branch_pushed" && event.sha === sha)
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "workspace_restarted" && event.agentId === "agent-1"
+      )
+    ).toBe(true);
+    },
+    15_000
+  );
+
+  test(
+    "externally killed sessions follow the same push and restart path",
+    async () => {
+    const { daemon, root, workspaces } = await createWorkspaceHarness({
+      count: 1,
+      execCommand: LONG_RUNNING_EXEC,
+      user: {
+        userName: "Alice Example",
+        userEmail: "alice@example.com"
+      }
+    });
+    cleanups.add(() => cleanupRepo(root, daemon));
+
+    const initial = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) => workspace.iteration === 1 && workspace.state === "active"
+    );
+    const sha = await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "killed session push");
+
+    await killWorkspaceSession(initial);
+
+    const restarted = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) =>
+        workspace.iteration >= 2 &&
+        workspace.state === "active" &&
+        workspace.lastPushedSha === sha &&
+        workspace.lastExitedAt !== undefined &&
+        workspace.currentSessionId !== undefined &&
+        workspace.currentSessionId !== initial.currentSessionId,
+      15_000
+    );
+
+    expect(restarted.lastExitCode).toBeUndefined();
+    },
+    15_000
+  );
+
+  test("keeps publishing through the stable coordination branch after a local branch switch", async () => {
+    const { daemon, root, workspaces } = await createWorkspaceHarness({
+      count: 1,
+      execCommand: LONG_RUNNING_EXEC,
+      user: {
+        userName: "Alice Example",
+        userEmail: "alice@example.com"
+      }
+    });
+    cleanups.add(() => cleanupRepo(root, daemon));
+
+    const initial = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) => workspace.iteration === 1 && workspace.state === "active"
+    );
+
+    await runCommand(["git", "checkout", "-b", "autoresearch/mar14"], {
+      cwd: workspaces[0]!.workspaceRoot
+    });
+    const sha = await commitWorkspaceChange(
+      workspaces[0]!.workspaceRoot,
+      "switched local branch"
+    );
+
+    await killWorkspaceSession(initial);
+
+    const record = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (workspace) =>
+        workspace.iteration >= 2 &&
+        workspace.localBranch === "autoresearch/mar14" &&
+        workspace.lastPushedSha === sha,
+      15_000
+    );
+
+    const coordinationHead = (
+      await runCommand([
         "git",
         "--git-dir",
         `${root}/.revis/coordination.git`,
         "rev-parse",
-        "revis/alice/agent-1/work"
-      ],
-      { check: false }
-    );
-    expect(missingRef.exitCode).not.toBe(0);
+        record.coordinationBranch
+      ])
+    ).stdout.trim();
 
-    const newSha = await commitWorkspaceChange(
-      workspaces[0]!.repoPath,
-      "commit after daemon start"
-    );
-
-    await waitFor(async () => {
-      const result = await runCommand(
-        [
-          "git",
-          "--git-dir",
-          `${root}/.revis/coordination.git`,
-          "rev-parse",
-          "revis/alice/agent-1/work"
-        ],
-        { check: false }
-      );
-      return result.exitCode === 0 && result.stdout.trim() === newSha;
-    });
-
-    const records = await loadWorkspaceRecords(root);
-    expect(records[0]?.lastPushedSha).toBe(newSha);
-    expect(records[0]?.lastCommitSha).toBe(newSha);
-    expect(records[0]?.lastPushedSha).not.toBe(oldSha);
+    expect(coordinationHead).toBe(sha);
   });
 
-  test("keeps relaying through the stable coordination branch after a local branch switch", async () => {
-    const { daemon, root, workspaces } = await createWorkspaceHarness({
-      count: 2,
-      user: {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      }
-    });
-    cleanups.add(() => cleanupRepo(root, daemon));
+  test(
+    "reused agent ids replace stale remote coordination refs",
+    async () => {
+      const { config, daemon, root, workspaces } = await createWorkspaceHarness({
+        count: 1,
+        execCommand: LONG_RUNNING_EXEC,
+        user: {
+          userName: "Alice Example",
+          userEmail: "alice@example.com"
+        }
+      });
+      cleanups.add(() => cleanupRepo(root, daemon));
 
-    await runCommand(["git", "checkout", "-b", "autoresearch/mar14"], {
-      cwd: workspaces[0]!.repoPath
-    });
-
-    const sha = await commitWorkspaceChange(
-      workspaces[0]!.repoPath,
-      "switched local branch"
-    );
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return records.find((record) => record.agentId === "agent-1")?.localBranch
-        === "autoresearch/mar14";
-    });
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(root);
-      return (
-        records
-          .find((record) => record.agentId === "agent-2")
-          ?.queuedSteeringMessages?.some(
-            (line) =>
-              line.includes(sha.slice(0, 8)) && line.includes("switched local branch")
-          ) ?? false
+      const initial = await waitForWorkspaceRecord(
+        root,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active"
       );
-    });
+      const firstSha = await commitWorkspaceChange(
+        workspaces[0]!.workspaceRoot,
+        "initial coordination publish"
+      );
 
-    await waitFor(async () => {
+      await exitWorkspaceSession(initial);
+      const published = await waitForWorkspaceRecord(
+        root,
+        "agent-1",
+        (workspace) =>
+          workspace.iteration >= 2 &&
+          workspace.state === "active" &&
+          workspace.lastPushedSha === firstSha,
+        15_000
+      );
+
+      await stopWorkspaces(root, [published]);
+
+      const replacement = await createWorkspaces(root, config, 1, LONG_RUNNING_EXEC);
+      expect(replacement[0]!.agentId).toBe("agent-1");
+
+      await notifyDaemon(root, {
+        type: "reconcile",
+        reason: "test-reused-agent"
+      });
+
+      const restarted = await waitForWorkspaceRecord(
+        root,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active",
+        15_000
+      );
+      const secondSha = await commitWorkspaceChange(
+        replacement[0]!.workspaceRoot,
+        "replacement coordination publish"
+      );
+
+      await exitWorkspaceSession(restarted);
+
+      const replacementRecord = await waitForWorkspaceRecord(
+        root,
+        "agent-1",
+        (workspace) =>
+          workspace.iteration >= 2 &&
+          workspace.state === "active" &&
+          workspace.lastPushedSha === secondSha,
+        15_000
+      );
+
+      expect(replacementRecord.lastPushedSha).toBe(secondSha);
+
       const coordinationHead = (
         await runCommand([
           "git",
           "--git-dir",
           `${root}/.revis/coordination.git`,
           "rev-parse",
-          "revis/alice/agent-1/work"
+          replacementRecord.coordinationBranch
         ])
       ).stdout.trim();
-      return coordinationHead === sha;
-    });
-  });
 
-  test("fetches and relays remote operator branches through the shared namespace", async () => {
-    const { remotePath, aliceRoot, bobRoot } = await createSharedRemote(
-      {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      },
-      {
-        userName: "Bob Example",
-        userEmail: "bob@example.com"
-      }
-    );
+      expect(coordinationHead).toBe(secondSha);
+    },
+    20_000
+  );
 
-    const aliceConfig = await initializeRevis(aliceRoot, 1);
-    const bobConfig = await initializeRevis(bobRoot, 1);
-    const aliceWorkspaces = await createWorkspaces(
-      aliceRoot,
-      aliceConfig,
-      1,
-      daemonSocketPath(aliceRoot)
-    );
-    const bobWorkspaces = await createWorkspaces(
-      bobRoot,
-      bobConfig,
-      1,
-      daemonSocketPath(bobRoot)
-    );
-
-    const aliceDaemon = await startTestDaemon(aliceRoot);
-    const bobDaemon = await startTestDaemon(bobRoot);
-    cleanups.add(async () => {
-      await cleanupRepo(aliceRoot, aliceDaemon);
-      await cleanupRepo(bobRoot, bobDaemon);
-      await cleanupRepo(remotePath);
-    });
-
-    const sha = await commitWorkspaceChange(
-      aliceWorkspaces[0]!.repoPath,
-      "alice remote update"
-    );
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(bobRoot);
-      return (
-        records[0]?.queuedSteeringMessages?.some(
-          (line) =>
-            line.includes(sha.slice(0, 8)) && line.includes("alice/agent-1")
-        ) ?? false
-      );
-    }, 12_000);
-
-    await waitFor(async () => {
-      const result = await runCommand(
-        ["git", "rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
+  test(
+    "fetches other operators' refs before starting the next iteration",
+    async () => {
+      const { remotePath, aliceRoot, bobRoot } = await createSharedRemote(
         {
-          cwd: bobWorkspaces[0]!.repoPath,
-          check: false
+          userName: "Alice Example",
+          userEmail: "alice@example.com"
+        },
+        {
+          userName: "Bob Example",
+          userEmail: "bob@example.com"
         }
       );
-      return result.exitCode === 0 && result.stdout.trim() === sha;
-    });
-  });
 
-  test("daemon startup baselines existing remote heads instead of replaying them", async () => {
-    const { remotePath, aliceRoot, bobRoot } = await createSharedRemote(
-      {
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
-      },
-      {
-        userName: "Bob Example",
-        userEmail: "bob@example.com"
-      }
-    );
-
-    const aliceConfig = await initializeRevis(aliceRoot, 1);
-    const bobConfig = await initializeRevis(bobRoot, 1);
-    const aliceWorkspaces = await createWorkspaces(
-      aliceRoot,
-      aliceConfig,
-      1,
-      daemonSocketPath(aliceRoot)
-    );
-    await createWorkspaces(
-      bobRoot,
-      bobConfig,
-      1,
-      daemonSocketPath(bobRoot)
-    );
-
-    const aliceDaemon = await startTestDaemon(aliceRoot);
-    let bobDaemon: Awaited<ReturnType<typeof startTestDaemon>> | undefined;
-    cleanups.add(async () => {
-      await cleanupRepo(aliceRoot, aliceDaemon);
-      await cleanupRepo(bobRoot, bobDaemon);
-      await cleanupRepo(remotePath);
-    });
-
-    const oldSha = await commitWorkspaceChange(
-      aliceWorkspaces[0]!.repoPath,
-      "alice old remote update"
-    );
-
-    await waitFor(async () => {
-      const result = await runCommand(
-        ["git", "ls-remote", "--heads", "origin", "revis/alice/agent-1/work"],
-        { cwd: bobRoot, check: false }
+      const aliceConfig = await initializeRevis(aliceRoot, 1);
+      const bobConfig = await initializeRevis(bobRoot, 1);
+      const aliceWorkspaces = await createWorkspaces(
+        aliceRoot,
+        aliceConfig,
+        1,
+        LONG_RUNNING_EXEC
       );
-      return result.exitCode === 0 && result.stdout.includes(oldSha);
-    });
-
-    bobDaemon = await startTestDaemon(bobRoot);
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(bobRoot);
-      return records.length === 1;
-    });
-
-    const afterStartup = await loadWorkspaceRecords(bobRoot);
-    expect(afterStartup[0]?.queuedSteeringMessages).toBeUndefined();
-
-    const newSha = await commitWorkspaceChange(
-      aliceWorkspaces[0]!.repoPath,
-      "alice new remote update"
-    );
-
-    await waitFor(async () => {
-      const records = await loadWorkspaceRecords(bobRoot);
-      return (
-        records[0]?.queuedSteeringMessages?.some(
-          (line) =>
-            line.includes(newSha.slice(0, 8)) && line.includes("alice/agent-1")
-        ) ?? false
+      const bobWorkspaces = await createWorkspaces(
+        bobRoot,
+        bobConfig,
+        1,
+        BOB_REMOTE_PROBE_EXEC
       );
-    }, 12_000);
-  });
+
+      const aliceDaemon = await startTestDaemon(aliceRoot);
+      const bobDaemon = await startTestDaemon(bobRoot);
+      cleanups.add(async () => {
+        await cleanupRepo(aliceRoot, aliceDaemon);
+        await cleanupRepo(bobRoot, bobDaemon);
+        await cleanupRepo(remotePath);
+      });
+
+      const aliceInitial = await waitForWorkspaceRecord(
+        aliceRoot,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active"
+      );
+      const bobInitial = await waitForWorkspaceRecord(
+        bobRoot,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active"
+      );
+
+      const aliceSha = await commitWorkspaceChange(
+        aliceWorkspaces[0]!.workspaceRoot,
+        "alice remote update"
+      );
+      await killWorkspaceSession(aliceInitial);
+
+      await waitForWorkspaceRecord(
+        aliceRoot,
+        "agent-1",
+        (workspace) =>
+          workspace.iteration >= 2 && workspace.lastPushedSha === aliceSha,
+        15_000
+      );
+
+      await killWorkspaceSession(bobInitial);
+
+      await waitForWorkspaceRecord(
+        bobRoot,
+        "agent-1",
+        (workspace) => workspace.iteration >= 2 && workspace.state === "active",
+        15_000
+      );
+
+      const startupShaPath = join(
+        bobWorkspaces[0]!.workspaceRoot,
+        STARTUP_REMOTE_SHA_FILE
+      );
+      await waitFor(
+        async () => (await pathExists(startupShaPath)) && (await readText(startupShaPath)).trim() === aliceSha,
+        15_000
+      );
+    },
+    20_000
+  );
+
+  test(
+    "daemon startup baselines existing remote refs before iteration 1 starts",
+    async () => {
+      const { remotePath, aliceRoot, bobRoot } = await createSharedRemote(
+        {
+          userName: "Alice Example",
+          userEmail: "alice@example.com"
+        },
+        {
+          userName: "Bob Example",
+          userEmail: "bob@example.com"
+        }
+      );
+
+      const aliceConfig = await initializeRevis(aliceRoot, 1);
+      const bobConfig = await initializeRevis(bobRoot, 1);
+      const aliceWorkspaces = await createWorkspaces(
+        aliceRoot,
+        aliceConfig,
+        1,
+        LONG_RUNNING_EXEC
+      );
+      await createWorkspaces(
+        bobRoot,
+        bobConfig,
+        1,
+        BOB_REMOTE_PROBE_EXEC
+      );
+
+      const aliceDaemon = await startTestDaemon(aliceRoot);
+      let bobDaemon: Awaited<ReturnType<typeof startTestDaemon>> | undefined;
+      cleanups.add(async () => {
+        await cleanupRepo(aliceRoot, aliceDaemon);
+        await cleanupRepo(bobRoot, bobDaemon);
+        await cleanupRepo(remotePath);
+      });
+
+      const aliceInitial = await waitForWorkspaceRecord(
+        aliceRoot,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active"
+      );
+      const aliceSha = await commitWorkspaceChange(
+        aliceWorkspaces[0]!.workspaceRoot,
+        "alice startup baseline"
+      );
+      await killWorkspaceSession(aliceInitial);
+
+      await waitForWorkspaceRecord(
+        aliceRoot,
+        "agent-1",
+        (workspace) =>
+          workspace.iteration >= 2 && workspace.lastPushedSha === aliceSha,
+        15_000
+      );
+
+      await waitFor(async () => {
+        const result = await runCommand(
+          ["git", "ls-remote", "--heads", "origin", "revis/alice/agent-1/work"],
+          { cwd: bobRoot, check: false }
+        );
+        return result.exitCode === 0 && result.stdout.includes(aliceSha);
+      }, 15_000);
+
+      bobDaemon = await startTestDaemon(bobRoot);
+
+      const bobRecord = await waitForWorkspaceRecord(
+        bobRoot,
+        "agent-1",
+        (workspace) => workspace.iteration === 1 && workspace.state === "active",
+        15_000
+      );
+      const startupShaPath = join(bobRecord.workspaceRoot, STARTUP_REMOTE_SHA_FILE);
+      await waitFor(
+        async () => (await pathExists(startupShaPath)) && (await readText(startupShaPath)).trim() === aliceSha,
+        15_000
+      );
+
+      expect(await requireWorkspaceRecord(bobRoot, "agent-1")).toMatchObject({
+        iteration: 1,
+        state: "active"
+      });
+      expect((await loadEvents(bobRoot)).some((event) => event.type === "workspace_restarted")).toBe(false);
+    },
+    20_000
+  );
 });

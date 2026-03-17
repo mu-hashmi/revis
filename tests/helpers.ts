@@ -5,10 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { saveConfig } from "../src/core/config";
-import type { RevisConfig } from "../src/core/models";
-import { daemonSocketPath } from "../src/core/ipc";
-import { runCommand, sleep } from "../src/core/process";
-import { RevisDaemon, stopDaemon } from "../src/coordination/daemon";
+import type { RevisConfig, WorkspaceRecord } from "../src/core/models";
+import { processAlive, runCommand, sleep } from "../src/core/process";
+import { RevisDaemon, notifyDaemon, stopDaemon } from "../src/coordination/daemon";
 import { initializeProject } from "../src/coordination/setup";
 import { loadStatusSnapshot } from "../src/coordination/status";
 import { clearRuntime, loadWorkspaceRecords } from "../src/coordination/runtime";
@@ -88,19 +87,22 @@ export async function startTestDaemon(root: string): Promise<RevisDaemon> {
 /** Create a local test repo with workspaces and an optional daemon. */
 export async function createWorkspaceHarness(options: {
   count: number;
+  execCommand: string;
   pollSeconds?: number;
   startDaemon?: boolean;
   user: TestRepoOptions;
 }): Promise<WorkspaceHarness> {
   const root = await createRepo(options.user);
   const config = await initializeRevis(root, options.pollSeconds);
-  const workspaces = await createWorkspaces(
-    root,
-    config,
-    options.count,
-    daemonSocketPath(root)
-  );
+  const workspaces = await createWorkspaces(root, config, options.count, options.execCommand);
   const daemon = options.startDaemon === false ? undefined : await startTestDaemon(root);
+
+  if (daemon) {
+    await notifyDaemon(root, {
+      type: "reconcile",
+      reason: "test-start"
+    });
+  }
 
   return {
     config,
@@ -112,17 +114,17 @@ export async function createWorkspaceHarness(options: {
 
 /** Append and commit a change inside one workspace repository. */
 export async function commitWorkspaceChange(
-  repoPath: string,
+  workspaceRoot: string,
   message: string,
   body = `${message}\n`
 ): Promise<string> {
-  const marker = join(repoPath, `${message.replace(/\s+/g, "-")}.txt`);
+  const marker = join(workspaceRoot, `${message.replace(/\s+/g, "-")}.txt`);
   await writeFile(marker, body, "utf8");
-  await runCommand(["git", "add", "."], { cwd: repoPath });
-  await runCommand(["git", "commit", "-m", message], { cwd: repoPath });
+  await runCommand(["git", "add", "."], { cwd: workspaceRoot });
+  await runCommand(["git", "commit", "-m", message], { cwd: workspaceRoot });
   return (
     await runCommand(["git", "rev-parse", "HEAD"], {
-      cwd: repoPath
+      cwd: workspaceRoot
     })
   ).stdout.trim();
 }
@@ -141,6 +143,78 @@ export async function waitFor(
   }
 
   throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+/** Load one workspace record by agent id or throw when it is missing. */
+export async function requireWorkspaceRecord(
+  root: string,
+  agentId: string
+): Promise<WorkspaceRecord> {
+  const record = (await loadWorkspaceRecords(root)).find(
+    (candidate) => candidate.agentId === agentId
+  );
+  if (!record) {
+    throw new Error(`Missing workspace record for ${agentId}`);
+  }
+
+  return record;
+}
+
+/** Wait until one workspace record matches a predicate, then return it. */
+export async function waitForWorkspaceRecord(
+  root: string,
+  agentId: string,
+  predicate: (record: WorkspaceRecord) => boolean,
+  timeoutMs = 8_000
+): Promise<WorkspaceRecord> {
+  let latest: WorkspaceRecord | undefined;
+
+  await waitFor(async () => {
+    latest = (await loadWorkspaceRecords(root)).find(
+      (candidate) => candidate.agentId === agentId
+    );
+    return latest ? predicate(latest) : false;
+  }, timeoutMs);
+
+  return latest!;
+}
+
+/** Terminate one headless workspace command in a way that records an exit code. */
+export async function exitWorkspaceSession(record: WorkspaceRecord): Promise<void> {
+  const pid = requireWorkspacePid(record);
+
+  process.kill(-pid, "SIGTERM");
+}
+
+/** Kill one headless workspace process group as an external crash. */
+export async function killWorkspaceSession(record: WorkspaceRecord): Promise<void> {
+  const pid = requireWorkspacePid(record);
+
+  process.kill(-pid, "SIGKILL");
+}
+
+/** Return whether one local detached process id still exists. */
+export function workspaceProcessAlive(pidText: string): boolean {
+  const pid = Number.parseInt(pidText, 10);
+  if (!Number.isInteger(pid)) {
+    throw new Error(`Invalid process id: ${pidText}`);
+  }
+
+  return processAlive(pid);
+}
+
+/** Parse the detached process-group leader stored on one workspace record. */
+function requireWorkspacePid(record: WorkspaceRecord): number {
+  if (!record.currentSessionId) {
+    throw new Error(`Workspace ${record.agentId} has no active process id`);
+  }
+
+  const pid = Number.parseInt(record.currentSessionId, 10);
+  if (!Number.isInteger(pid)) {
+    throw new Error(`Invalid process id for ${record.agentId}: ${record.currentSessionId}`);
+  }
+
+  return pid;
 }
 
 /** Create a LIFO cleanup stack shared by test files. */

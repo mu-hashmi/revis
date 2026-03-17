@@ -40,7 +40,7 @@ export function buildCli(io: CliWriters = {}): Command {
   program
     .name("revis")
     .description(
-      "Passive distributed workspace coordination for tmux-backed agent sessions."
+      "Passive distributed workspace coordination for headless agent sessions."
     )
     .configureOutput({
       writeErr,
@@ -61,9 +61,9 @@ export function buildCli(io: CliWriters = {}): Command {
 
   program
     .command("spawn")
-    .description("Create isolated workspaces, start the daemon, and optionally run a command.")
+    .description("Create isolated workspaces and register a restartable iteration command.")
     .argument("<count>", "number of workspaces to create")
-    .option("--exec <command>", "shell command to run in each workspace")
+    .requiredOption("--exec <command>", "shell command to run in each workspace")
     .action(async (countText: string, options: { exec?: string }) => {
       await runBatchCommand(parseCount(countText), options.exec, writeOut);
     });
@@ -196,20 +196,18 @@ async function runBatchCommand(
   execCommand: string | undefined,
   writeOut: (text: string) => void
 ): Promise<void> {
+  if (!execCommand) {
+    throw new RevisError("`revis spawn` now requires `--exec <command>`.");
+  }
+
   const { config, root } = await loadCommandContext();
   const created = await prepareWorkspaceBatch(root, config, {
     count,
-    ...(execCommand ? { execCommand } : {})
+    execCommand
   });
 
   for (const workspace of created) {
     writeOut(`${formatBatchResult(workspace, execCommand)}\n`);
-  }
-
-  if (execCommand) {
-    writeOut(
-      "NOTE: the launched agent may still need confirmation before it begins working. Run `revis status` to confirm.\n"
-    );
   }
 }
 
@@ -226,7 +224,8 @@ function formatBatchResult(
   execCommand: string | undefined
 ): string {
   const prefix = execCommand
-    ? `${workspace.agentId} launched`
+    ? `${workspace.agentId} registered`
     : `${workspace.agentId} ${workspace.coordinationBranch}`;
-  return `${prefix} local=${workspace.localBranch} ${workspace.attachCmd.join(" ")}`;
+  const attach = workspace.attachCmd?.join(" ") ?? workspace.attachLabel ?? "no local attach";
+  return `${prefix} local=${workspace.localBranch} ${attach}`;
 }

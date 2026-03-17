@@ -1,16 +1,23 @@
 import { pathExists } from "../src/core/files";
 import { runCommand } from "../src/core/process";
 import { loadWorkspaceRecords } from "../src/coordination/runtime";
-import { tmuxSessionExists } from "../src/coordination/workspaces";
+import { promoteWorkspace } from "../src/coordination/promotion";
 import { runCli } from "./cli-helpers";
 import {
   cleanupRepo,
+  commitWorkspaceChange,
   createCleanupStack,
   createRepo,
   createWorkspaceHarness,
   initializeRevis,
-  waitFor
+  killWorkspaceSession,
+  readText,
+  waitFor,
+  waitForWorkspaceRecord,
+  workspaceProcessAlive
 } from "./helpers";
+
+const LONG_RUNNING_EXEC = "sleep 30";
 
 describe("operator status and spawn", () => {
   const cleanups = createCleanupStack();
@@ -20,6 +27,7 @@ describe("operator status and spawn", () => {
   test("status prints the daemon and workspace overview", async () => {
     const { daemon, root } = await createWorkspaceHarness({
       count: 1,
+      execCommand: LONG_RUNNING_EXEC,
       user: {
         userName: "Alice Example",
         userEmail: "alice@example.com"
@@ -33,11 +41,24 @@ describe("operator status and spawn", () => {
     expect(result.stdout).toContain("COMMITS");
     expect(result.stdout).toContain("LAST COMMIT");
     expect(result.stdout).toContain("agent-1");
-    expect(result.stdout).toContain("[idle]");
+    expect(result.stdout).toContain("[active]");
     expect(result.stdout).not.toContain("ATTACH");
   });
 
-  test("spawn creates workspaces and can run a supplied command", async () => {
+  test("spawn requires --exec", async () => {
+    const root = await createRepo({
+      userName: "Alice Example",
+      userEmail: "alice@example.com"
+    });
+    await initializeRevis(root);
+    cleanups.add(() => cleanupRepo(root));
+
+    await expect(runCli(root, ["spawn", "1"])).rejects.toThrow(
+      "required option '--exec <command>' not specified"
+    );
+  });
+
+  test("spawn creates workspaces and persists the iteration command", async () => {
     const root = await createRepo({
       userName: "Alice Example",
       userEmail: "alice@example.com"
@@ -49,48 +70,65 @@ describe("operator status and spawn", () => {
       "spawn",
       "1",
       "--exec",
-      "printf 'hello-from-exec\\n'"
+      "printf 'hello-from-exec\\n'; sleep 30"
     ]);
 
-    expect(result.stdout).toContain("agent-1 launched");
-    expect(result.stdout).toContain(
-      "NOTE: the launched agent may still need confirmation before it begins working. Run `revis status` to confirm."
-    );
+    expect(result.stdout).toContain("agent-1 registered");
 
-    await waitFor(async () => (await loadWorkspaceRecords(root)).length === 1);
-    const [workspace] = await loadWorkspaceRecords(root);
-    expect(workspace?.coordinationBranch).toBe("revis/alice/agent-1/work");
+    const workspace = await waitForWorkspaceRecord(
+      root,
+      "agent-1",
+      (record) => record.iteration === 1 && record.state === "active",
+      15_000
+    );
+    expect(workspace.coordinationBranch).toBe("revis/alice/agent-1/work");
+    expect(workspace.execCommand).toBe("printf 'hello-from-exec\\n'; sleep 30");
 
     await waitFor(async () => {
-      const pane = await runCommand([
-        "tmux",
-        "capture-pane",
-        "-t",
-        `${workspace!.tmuxSession}:0`,
-        "-p"
-      ]);
-      return pane.stdout.includes("hello-from-exec");
-    });
+      return (
+        (await readText(workspace.attachLabel!)).includes("hello-from-exec")
+      );
+    }, 15_000);
   });
 
   test(
-    "status reports active when a launched command is still running under the pane shell",
+    "status reports failed when the next iteration is blocked by a dirty rebase",
     async () => {
-      const root = await createRepo({
-        userName: "Alice Example",
-        userEmail: "alice@example.com"
+      const { config, daemon, root, workspaces } = await createWorkspaceHarness({
+        count: 2,
+        execCommand: LONG_RUNNING_EXEC,
+        user: {
+          userName: "Alice Example",
+          userEmail: "alice@example.com"
+        }
       });
-    await initializeRevis(root);
-    cleanups.add(() => cleanupRepo(root));
+      cleanups.add(() => cleanupRepo(root, daemon));
 
-    await runCli(root, ["spawn", "1", "--exec", "sleep 30"]);
+      const sibling = await waitForWorkspaceRecord(
+        root,
+        "agent-2",
+        (record) => record.iteration === 1 && record.state === "active"
+      );
 
-    await waitFor(async () => {
+      await runCommand(["sh", "-lc", "printf 'dirty\\n' >> README.md"], {
+        cwd: workspaces[1]!.workspaceRoot
+      });
+      await commitWorkspaceChange(workspaces[0]!.workspaceRoot, "status blocked");
+      await promoteWorkspace(root, config, "agent-1");
+      await killWorkspaceSession(sibling);
+
+      await waitForWorkspaceRecord(
+        root,
+        "agent-2",
+        (record) => record.state === "failed",
+        15_000
+      );
+
       const result = await runCli(root, ["status"]);
-      return result.stdout.includes("agent-1") && result.stdout.includes("[active]");
-    });
+      expect(result.stdout).toContain("agent-2");
+      expect(result.stdout).toContain("[failed]");
     },
-    15_000
+    20_000
   );
 
   test("stop errors without a target", async () => {
@@ -116,14 +154,43 @@ describe("operator status and spawn", () => {
       await initializeRevis(root);
       cleanups.add(() => cleanupRepo(root));
 
-      await runCli(root, ["spawn", "2"]);
-      const workspaces = await loadWorkspaceRecords(root);
+      await runCli(root, ["spawn", "2", "--exec", LONG_RUNNING_EXEC]);
+      const workspaces = await Promise.all([
+        waitForWorkspaceRecord(
+          root,
+          "agent-1",
+          (record) => record.iteration === 1 && record.state === "active",
+          15_000
+        ),
+        waitForWorkspaceRecord(
+          root,
+          "agent-2",
+          (record) => record.iteration === 1 && record.state === "active",
+          15_000
+        )
+      ]);
       expect(workspaces).toHaveLength(2);
+
+      const firstPid = workspaces[0]!.currentSessionId;
+      const secondPid = workspaces[1]!.currentSessionId;
+      if (!firstPid || !secondPid) {
+        throw new Error("Missing local process metadata");
+      }
 
       const result = await runCli(root, ["stop", "agent-1"]);
       expect(result.stdout).toContain("Stopped agent-1");
-      expect(await tmuxSessionExists(workspaces[0]!.tmuxSession)).toBe(false);
-      expect(await tmuxSessionExists(workspaces[1]!.tmuxSession)).toBe(true);
+      expect(workspaceProcessAlive(firstPid)).toBe(false);
+      expect(
+        (
+          await waitForWorkspaceRecord(
+            root,
+            "agent-2",
+            (record) => record.state === "active" && record.currentSessionId !== undefined,
+            15_000
+          )
+        ).agentId
+      ).toBe("agent-2");
+      expect(workspaceProcessAlive(secondPid)).toBe(true);
       expect((await loadWorkspaceRecords(root)).map((record) => record.agentId)).toEqual([
         "agent-2"
       ]);
@@ -132,7 +199,7 @@ describe("operator status and spawn", () => {
   );
 
   test(
-    "stop --all tears down tmux sessions and runtime state",
+    "stop --all tears down headless sessions and runtime state",
     async () => {
       const root = await createRepo({
         userName: "Alice Example",
@@ -141,14 +208,22 @@ describe("operator status and spawn", () => {
       await initializeRevis(root);
       cleanups.add(() => cleanupRepo(root));
 
-      await runCli(root, ["spawn", "1"]);
-      const [workspace] = await loadWorkspaceRecords(root);
+      await runCli(root, ["spawn", "1", "--exec", LONG_RUNNING_EXEC]);
+      const workspace = await waitForWorkspaceRecord(
+        root,
+        "agent-1",
+        (record) => record.iteration === 1 && record.state === "active",
+        15_000
+      );
+      if (!workspace.currentSessionId) {
+        throw new Error("Missing local process metadata");
+      }
 
-      expect(await tmuxSessionExists(workspace!.tmuxSession)).toBe(true);
+      expect(workspaceProcessAlive(workspace.currentSessionId)).toBe(true);
 
       const result = await runCli(root, ["stop", "--all"]);
       expect(result.stdout).toContain("Stopped 1 workspaces");
-      expect(await tmuxSessionExists(workspace!.tmuxSession)).toBe(false);
+      expect(workspaceProcessAlive(workspace.currentSessionId)).toBe(false);
       expect(await pathExists(`${root}/.revis/runtime`)).toBe(false);
     },
     15_000

@@ -1,64 +1,38 @@
 /** Workspace batch orchestration shared by CLI entrypoints. */
 
+import { loadConfig } from "../core/config";
 import type { RevisConfig, WorkspaceRecord } from "../core/models";
 import { RevisError } from "../core/error";
-import { daemonSocketPath } from "../core/ipc";
-import { runCommand } from "../core/process";
 import { ensureDaemonRunning, notifyDaemon, stopDaemon } from "./daemon";
-import { deriveOperatorSlug } from "./repo";
-import {
-  clearRuntime,
-  ensureLiveSession,
-  finalizeLiveSession,
-  loadWorkspaceRecord,
-  loadWorkspaceRecords
-} from "./runtime";
-import { createWorkspaces, runCommandInWorkspaces, stopWorkspaces } from "./workspaces";
+import { loadRuntimeStore } from "./runtime-access";
+import { createWorkspaces, stopWorkspaces } from "./workspaces";
 
 export interface WorkspaceBatchOptions {
   count: number;
-  execCommand?: string;
+  execCommand: string;
 }
 
-/** Create workspaces, start the daemon, and optionally run a command in each one. */
+/** Create workspaces and wake the daemon so iteration 1 can start. */
 export async function prepareWorkspaceBatch(
   root: string,
   config: RevisConfig,
   options: WorkspaceBatchOptions
 ): Promise<WorkspaceRecord[]> {
-  await ensureTmuxReady();
-
-  await ensureLiveSession(root, {
-    coordinationRemote: config.coordinationRemote,
-    trunkBase: config.trunkBase,
-    operatorSlug: await deriveOperatorSlug(root)
-  });
-
-  // Bring the daemon fully online before any fresh workspace starts running user code.
-  // Otherwise the daemon's own startup sync can overlap the first agent-side git commands.
+  const created = await createWorkspaces(root, config, options.count, options.execCommand);
   await ensureDaemonRunning(root);
 
-  const created = await createWorkspaces(
-    root,
-    config,
-    options.count,
-    daemonSocketPath(root)
-  );
-
-  if (options.execCommand) {
-    await runCommandInWorkspaces(root, created, options.execCommand);
-  }
-
   await notifyDaemon(root, {
-    type: "sync",
-    reason: options.execCommand ? "spawn-exec" : "spawn"
+    type: "reconcile",
+    reason: "spawn"
   });
   return created;
 }
 
 /** Tear down one workspace and stop the daemon when no workspaces remain. */
 export async function stopWorkspace(root: string, agentId: string): Promise<void> {
-  const record = await loadWorkspaceRecord(root, agentId);
+  await loadConfig(root);
+  const runtime = await loadRuntimeStore(root);
+  const record = await runtime.loadWorkspaceRecord(agentId);
   if (!record) {
     throw new RevisError(`Unknown workspace ${agentId}`);
   }
@@ -66,30 +40,27 @@ export async function stopWorkspace(root: string, agentId: string): Promise<void
   await stopDaemon(root);
   await stopWorkspaces(root, [record]);
 
-  if ((await loadWorkspaceRecords(root)).length > 0) {
+  if ((await runtime.loadWorkspaceRecords()).length > 0) {
     await ensureDaemonRunning(root);
     await notifyDaemon(root, {
-      type: "sync",
+      type: "reconcile",
       reason: "stop-workspace"
     });
     return;
   }
 
-  await finalizeLiveSession(root);
-  await clearRuntime(root);
+  await runtime.finalizeLiveSession();
+  await runtime.clearRuntime();
 }
 
 /** Tear down every workspace plus the daemon for one initialized repository. */
 export async function stopWorkspaceBatch(root: string): Promise<number> {
-  const workspaces = await loadWorkspaceRecords(root);
+  await loadConfig(root);
+  const runtime = await loadRuntimeStore(root);
+  const workspaces = await runtime.loadWorkspaceRecords();
   await stopDaemon(root);
   await stopWorkspaces(root, workspaces);
-  await finalizeLiveSession(root);
-  await clearRuntime(root);
+  await runtime.finalizeLiveSession();
+  await runtime.clearRuntime();
   return workspaces.length;
-}
-
-/** Fail fast when tmux is unavailable. */
-async function ensureTmuxReady(): Promise<void> {
-  await runCommand(["tmux", "-V"]);
 }

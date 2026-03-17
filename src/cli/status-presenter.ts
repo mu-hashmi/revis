@@ -25,20 +25,19 @@ export function formatDaemonHealth(snapshot: StatusSnapshot): string {
 
 /** Format the shared repository context line for operator-facing views. */
 export function formatStatusContext(snapshot: StatusSnapshot): string {
-  return `operator ${snapshot.operatorSlug} remote ${snapshot.config.coordinationRemote} base ${snapshot.syncBranch}`;
+  return `operator ${snapshot.operatorSlug} provider ${snapshot.config.sandboxProvider} remote ${snapshot.config.coordinationRemote} base ${snapshot.syncBranch}`;
 }
 
 /** Format the common workspace summary text shared by CLI status and dashboard views. */
 export function formatWorkspaceSummary(workspace: WorkspaceRecord): string {
   const fields = [
-    `last=${workspace.lastCommitSha!.slice(0, 8)}`,
-    `pushed=${workspace.lastPushedSha!.slice(0, 8)}`,
-    `relayed=${workspace.lastRelayedSha!.slice(0, 8)}`,
+    `iter=${workspace.iteration}`,
+    `last=${workspace.lastCommitSha?.slice(0, 8) ?? "--------"}`,
+    `pushed=${workspace.lastPushedSha?.slice(0, 8) ?? "--------"}`,
     `rebase=${workspace.rebaseRequiredSha ? "pending" : "ok"}`
   ];
-  const queued = workspace.queuedSteeringMessages?.length ?? 0;
-  if (queued > 0) {
-    fields.push(`queued=${queued}`);
+  if (workspace.lastExitCode !== undefined) {
+    fields.push(`exit=${workspace.lastExitCode}`);
   }
 
   return [
@@ -109,15 +108,11 @@ function stateColor(state: WorkspaceRecord["state"]): string {
   switch (state) {
     case "active":
       return ANSI.green;
-    case "idle":
-      return ANSI.yellow;
     case "failed":
       return ANSI.red;
     case "stopped":
       return ANSI.gray;
     case "starting":
       return ANSI.blue;
-    case "stopping":
-      return ANSI.magenta;
   }
 }

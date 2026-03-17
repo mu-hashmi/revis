@@ -58,7 +58,7 @@ export async function sleep(milliseconds: number): Promise<void> {
 /**
  * Run a subprocess and capture its output.
  *
- * This is the default path for short-lived git/tmux helpers.
+ * This is the default path for short-lived git and process helpers.
  */
 export async function runCommand(
   argv: string[],
@@ -151,6 +151,24 @@ export async function runInteractive(
   return exitCode;
 }
 
+/** Return whether one process id still exists. */
+export function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    if (code === "EPERM") {
+      return true;
+    }
+
+    throw error;
+  }
+}
+
 interface ReadyProcessOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -193,7 +211,7 @@ function normalizeExitCode(
   throw new RevisError(`${shellJoin(argv)} exited without status information`);
 }
 
-/** Quote one shell argument for tmux and sh command injection. */
+/** Quote one shell argument for safe shell composition. */
 function shellEscape(part: string): string {
   if (/^[A-Za-z0-9_./:\\-]+$/.test(part)) {
     return part;

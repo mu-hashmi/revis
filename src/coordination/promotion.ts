@@ -1,20 +1,20 @@
 /** Operator-only promotion orchestration. */
 
-import type { PullRequestRef, RevisConfig } from "../core/models";
+import type { PullRequestRef, RevisConfig, WorkspaceRecord } from "../core/models";
 import { RevisError } from "../core/error";
 import { isoNow } from "../core/time";
-import { appendEvent, loadWorkspaceRecord } from "./runtime";
+import { loadRuntimeStore } from "./runtime-access";
+import { createWorkspaceProviderForKind } from "./provider";
 import {
   TRUNK_BRANCH,
-  pushBranch,
-  usesManagedTrunk,
   deriveOperatorSlug,
+  usesManagedTrunk,
   workspaceBranch
 } from "./repo";
 import { ensureDaemonRunning, notifyDaemon } from "./daemon";
 import { createOrReusePullRequest } from "./promotion-github";
-import { latestCommitSubject } from "./promotion-git";
 import { mergeIntoManagedTrunk } from "./promotion-local";
+import { pushWorkspaceHead, workspaceHeadSubject } from "./workspace-git";
 
 export interface PromotionResult {
   mode: "local" | "pull_request";
@@ -25,7 +25,7 @@ export interface PromotionResult {
 interface PromotionTarget {
   agentId: string;
   coordinationBranch: string;
-  repoPath: string;
+  workspace: WorkspaceRecord;
 }
 
 /** Promote one owned workspace branch. */
@@ -35,11 +35,10 @@ export async function promoteWorkspace(
   agentId: string
 ): Promise<PromotionResult> {
   const target = await loadPromotionTarget(root, agentId);
-  await pushBranch(
-    target.repoPath,
-    config.coordinationRemote,
-    "HEAD",
-    target.coordinationBranch
+  await pushWorkspaceHead(
+    createWorkspaceProviderForKind(target.workspace.sandboxProvider),
+    target.workspace,
+    config.coordinationRemote
   );
 
   if (usesManagedTrunk(config.coordinationRemote)) {
@@ -56,7 +55,8 @@ async function loadPromotionTarget(
 ): Promise<PromotionTarget> {
   const operatorSlug = await deriveOperatorSlug(root);
   const branch = workspaceBranch(operatorSlug, agentId);
-  const workspace = await loadWorkspaceRecord(root, agentId);
+  const runtime = await loadRuntimeStore(root);
+  const workspace = await runtime.loadWorkspaceRecord(agentId);
   if (!workspace) {
     throw new RevisError(`Unknown workspace ${agentId}`);
   }
@@ -70,7 +70,7 @@ async function loadPromotionTarget(
   return {
     agentId,
     coordinationBranch: branch,
-    repoPath: workspace.repoPath
+    workspace
   };
 }
 
@@ -92,7 +92,7 @@ async function promoteManagedWorkspace(
   );
   await ensureDaemonRunning(root);
   await notifyDaemon(root, {
-    type: "sync",
+    type: "reconcile",
     reason: "promote"
   });
   return {
@@ -112,7 +112,10 @@ async function promotePullRequestWorkspace(
     config,
     target.coordinationBranch,
     config.trunkBase,
-    await latestCommitSubject(target.repoPath)
+    await workspaceHeadSubject(
+      createWorkspaceProviderForKind(target.workspace.sandboxProvider),
+      target.workspace
+    )
   );
   await appendPromotedEvent(
     root,
@@ -134,7 +137,8 @@ async function appendPromotedEvent(
   target: PromotionTarget,
   summary: string
 ): Promise<void> {
-  await appendEvent(root, {
+  const runtime = await loadRuntimeStore(root);
+  await runtime.appendEvent({
     timestamp: isoNow(),
     type: "promoted",
     agentId: target.agentId,

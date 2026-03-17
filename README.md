@@ -2,7 +2,7 @@
 
 **[Install](#install)** · **[Usage](#usage)** · **[How it works](#how-it-works)** · **[License](#license)**
 
-*Run parallel experiment loops across agents and machines. Commits relay to other agents in real time.*
+*Run parallel experiment loops across agents and machines with daemon-managed headless sessions.*
 
 Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). This is the [next step](https://x.com/karpathy/status/2030705271627284816).
 
@@ -41,24 +41,26 @@ revis spawn 4 --exec 'claude --dangerously-skip-permissions "Read program.md and
 Revis does 3 things:
 
 1. It creates isolated local clones with stable coordination refs like `revis/alice/agent-3/work`.
-2. It runs a daemon that pushes those refs, fetches everyone else's `revis/*` refs, and relays commit summaries into local tmux sessions.
+2. It runs a daemon that starts bounded headless sessions, pushes owned refs, fetches everyone else's `revis/*` refs, and rebases before the next iteration starts.
 3. It promotes one chosen workspace into managed trunk or into a pull request.
 
 The coordination loop looks like this:
 
 ```text
-┌───────────────────────┐   post-commit    ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
-│ workspace clone       │ ───────────────► │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
-│ tmux session + agent  │ ◄──── relay ──── │ local runtime state  │ ── rebase sync ─► │ remote coordination refs│
-└───────────────────────┘                  └──────────────────────┘                   └─────────────────────────┘
+┌───────────────────────┐   exit detected   ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
+│ workspace clone       │ ───────────────►  │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
+│ headless agent run    │ ◄──── restart ─── │ local runtime state  │ ── rebase sync ─► │ remote coordination refs│
+└───────────────────────┘                   └──────────────────────┘                   └─────────────────────────┘
 ```
 
-Every workspace installs a `post-commit` hook that notifies the daemon immediately. The daemon baselines current local and remote heads on startup, so old history is not replayed, then it:
+The daemon baselines current local and remote heads on startup, so old history is not replayed. Each workspace then runs in iterations:
 
-- pushes each owned workspace `HEAD` to `revis/<operator>/agent-<n>/work`
+- starts the workspace command from `revis spawn --exec '<command>'`
+- waits for that bounded session to exit
+- pushes the workspace `HEAD` to `revis/<operator>/agent-<n>/work`
 - fetches remote `revis/*/agent-*/work` refs
-- relays newly seen commit summaries into local tmux sessions
-- rebases owned workspaces onto the current sync target when trunk advances
+- rebases the workspace onto the current sync target before the next iteration starts
+- blocks restart when the workspace is dirty or the rebase conflicts
 
 For local `revis-local` coordination, that sync target is `revis/trunk`. For a real shared remote, it is the configured base branch.
 
@@ -69,7 +71,7 @@ Each workspace has two branch concepts:
 - the stable coordination ref owned by Revis: `revis/<operator>/agent-<n>/work`
 - the workspace repo's current local branch, which the agent may change freely
 
-Revis always publishes the workspace's current `HEAD` to the stable coordination ref. That keeps relay behavior consistent without forcing repo-specific branch naming.
+Revis always publishes the workspace's current `HEAD` to the stable coordination ref. That keeps coordination stable without forcing repo-specific branch naming.
 
 The operator slug comes from local git identity:
 
@@ -85,7 +87,7 @@ That lets multiple operators share one remote without colliding.
 
 Before promotion, Revis pushes the workspace's current `HEAD` to its stable coordination ref.
 
-- In managed-trunk mode (`revis-local`), Revis merges that coordination ref into `revis/trunk`, then the daemon rebases other local workspaces onto the new trunk head.
+- In managed-trunk mode (`revis-local`), Revis merges that coordination ref into `revis/trunk`, then the daemon rebases other local workspaces before their next restart.
 - Against a real shared remote, Revis pushes the coordination ref and opens or reuses a GitHub pull request targeting the configured base branch.
 
 ### Runtime files
@@ -103,17 +105,14 @@ Revis keeps its local runtime state under `.revis/`:
       events.jsonl
   runtime/
     daemon.json
-    relays.json
     events.jsonl           # symlink to the current live session log
     workspaces/
     activity/
   workspaces/
     agent-1/
       repo/
-        .revis/
-          agent.json
-          last-relayed-sha
-          hook-client.cjs
+      session.log
+      session.exit
 ```
 
 These files are local operator state. `revis init` adds the runtime, session archive, and workspace paths to `.gitignore`.
@@ -153,7 +152,6 @@ npm link
 
 - Node 20+
 - `git`
-- `tmux`
 - `gh` on your `PATH` if you want PR-based promotion against a GitHub remote
 
 ---
@@ -174,15 +172,15 @@ revis init
 revis spawn 4 --exec 'codex --yolo'
 ```
 
-Use `revis spawn N` if you only want the workspaces and daemon. Use `--exec '<command>'` when you also want Revis to start something inside each workspace tmux pane.
+`--exec` is required. Revis persists that command in workspace metadata and uses it to restart the next bounded iteration after every sync cycle.
 
-Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a tmux session.
+Revis does not care whether that command is Codex, Claude, or anything else that makes sense in a headless workspace loop.
 
 ### 3. Inspect and attach
 
 - `revis dashboard` launches the local timeline dashboard in your browser.
-- `revis status` prints a compact table with workspace state and attach commands.
-- Attach directly with the printed `tmux attach -t ...` command for the workspace you want to inspect.
+- `revis status` prints a compact table with workspace state.
+- Inspect live output with `tail -f .revis/workspaces/agent-1/session.log`.
 
 ---
 

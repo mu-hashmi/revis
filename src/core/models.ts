@@ -10,18 +10,15 @@ export type JsonValue =
       [key: string]: JsonValue;
     };
 
-export type AgentState =
-  | "starting"
-  | "idle"
-  | "active"
-  | "stopping"
-  | "stopped"
-  | "failed";
+export type SandboxProvider = "local" | "daytona";
+
+export type AgentState = "starting" | "active" | "failed" | "stopped";
 
 export interface RevisConfig {
   coordinationRemote: string;
   trunkBase: string;
   remotePollSeconds: number;
+  sandboxProvider: SandboxProvider;
 }
 
 export interface WorkspaceRecord {
@@ -29,20 +26,24 @@ export interface WorkspaceRecord {
   operatorSlug: string;
   coordinationBranch: string;
   localBranch: string;
-  expectedPaneCommand?: string;
-  repoPath: string;
-  tmuxSession: string;
+  workspaceRoot: string;
+  execCommand: string;
+  sandboxProvider: SandboxProvider;
   state: AgentState;
   createdAt: string;
-  attachCmd: string[];
-  attachLabel: string;
+  attachCmd?: string[];
+  attachLabel?: string;
+  sandboxId?: string;
+  currentSessionId?: string;
+  iteration: number;
+  lastStartedAt?: string;
+  lastExitedAt?: string;
+  lastExitCode?: number;
   lastCommitSha?: string;
-  lastRelayedSha?: string;
   lastPushedSha?: string;
   lastSeenRemoteSha?: string;
   lastRebasedOntoSha?: string;
   rebaseRequiredSha?: string;
-  queuedSteeringMessages?: string[];
   lastError?: string;
 }
 
@@ -53,18 +54,15 @@ export interface StatusWorkspaceRecord extends WorkspaceRecord {
 }
 
 export interface DaemonRecord {
-  pid: number;
-  socketPath: string;
+  sandboxProvider: SandboxProvider;
   syncTargetBranch: string;
   startedAt: string;
+  pid?: number;
+  socketPath?: string;
   lastSyncTargetSha?: string;
   lastFetchAt?: string;
   lastEventAt?: string;
   lastError?: string;
-}
-
-export interface RelayRegistry {
-  byBranch: Record<string, string>;
 }
 
 export interface SessionParticipant {
@@ -92,13 +90,13 @@ export interface RuntimeEvent {
   timestamp: string;
   type:
     | "workspace_created"
-    | "workspace_started"
+    | "iteration_started"
+    | "iteration_exited"
+    | "workspace_restarted"
     | "daemon_started"
     | "daemon_stopped"
-    | "commit_relayed"
-    | "relay_received"
     | "branch_pushed"
-    | "remote_branch_seen"
+    | "remote_refs_fetched"
     | "workspace_rebased"
     | "workspace_rebase_pending"
     | "workspace_rebase_failed"
@@ -107,11 +105,6 @@ export interface RuntimeEvent {
   agentId?: string;
   branch?: string;
   sha?: string;
-  sourceAgentId?: string;
-  sourceBranch?: string;
-  destinationAgentId?: string;
-  destinationBranch?: string;
-  deliveryMode?: "typed" | "queued";
   summary: string;
   metadata?: JsonValue;
 }
@@ -123,10 +116,8 @@ export interface PullRequestRef {
   created: boolean;
 }
 
-export interface CommitNotification {
-  type?: "commit" | "sync" | "shutdown";
-  agentId?: string;
-  sha?: string;
+export interface DaemonRequest {
+  type?: "reconcile" | "shutdown";
   reason?: string;
 }
 

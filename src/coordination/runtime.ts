@@ -13,7 +13,6 @@ import { dirname, join, relative } from "node:path";
 
 import type {
   DaemonRecord,
-  RelayRegistry,
   RuntimeEvent,
   SessionMeta,
   SessionParticipant,
@@ -83,11 +82,6 @@ export function eventsPath(root: string): string {
 /** Return the daemon runtime record path. */
 export function daemonRecordPath(root: string): string {
   return join(runtimeDir(root), "daemon.json");
-}
-
-/** Return the relay registry path. */
-export function relayRegistryPath(root: string): string {
-  return join(runtimeDir(root), "relays.json");
 }
 
 /** Return one workspace runtime record path. */
@@ -179,29 +173,6 @@ export async function deleteWorkspaceRecord(
   agentId: string
 ): Promise<void> {
   await rm(workspaceRecordPath(root, agentId), { force: true });
-}
-
-/** Persist relay dedupe state. */
-export async function writeRelayRegistry(
-  root: string,
-  registry: RelayRegistry
-): Promise<void> {
-  await writeRuntimeJson(root, relayRegistryPath(root), registry);
-}
-
-/** Load relay dedupe state. */
-export async function loadRelayRegistry(root: string): Promise<RelayRegistry> {
-  const registry = await loadRuntimeJsonOrNull<RelayRegistry>(relayRegistryPath(root));
-  if (!registry) {
-    return { byBranch: {} };
-  }
-
-  return registry;
-}
-
-/** Remove relay dedupe state. */
-export async function deleteRelayRegistry(root: string): Promise<void> {
-  await rm(relayRegistryPath(root), { force: true });
 }
 
 /** Ensure one live session exists and return its metadata. */
@@ -550,23 +521,88 @@ async function runtimeEntryExists(path: string): Promise<boolean> {
   }
 }
 
-interface LegacyWorkspaceRecord extends Omit<WorkspaceRecord, "coordinationBranch" | "localBranch"> {
+interface LegacyWorkspaceRecord
+  extends Omit<
+    WorkspaceRecord,
+    | "coordinationBranch"
+    | "execCommand"
+    | "iteration"
+    | "localBranch"
+    | "sandboxProvider"
+    | "workspaceRoot"
+  > {
   branch: string;
+  expectedPaneCommand?: string;
+  lastRelayedSha?: string;
+  queuedSteeringMessages?: string[];
+  repoPath?: string;
+  sandboxProvider?: WorkspaceRecord["sandboxProvider"];
+  workspaceRoot?: string;
 }
 
-/** Normalize persisted workspace records across branch-model changes. */
+/** Validate one persisted workspace record and normalize its state field. */
 function normalizeWorkspaceRecord(
   record: WorkspaceRecord | LegacyWorkspaceRecord
 ): WorkspaceRecord {
-  if ("coordinationBranch" in record && "localBranch" in record) {
-    return record;
-  }
-
   return {
     ...record,
-    coordinationBranch: record.branch,
-    localBranch: record.branch
+    coordinationBranch: requireWorkspaceString(record, "coordinationBranch"),
+    execCommand: requireWorkspaceString(record, "execCommand"),
+    iteration: requireWorkspaceIteration(record),
+    localBranch: requireWorkspaceString(record, "localBranch"),
+    sandboxProvider: requireSandboxProvider(record),
+    state: normalizeAgentState(record.state),
+    workspaceRoot: requireWorkspaceString(record, "workspaceRoot"),
+    ...(record.attachCmd ? { attachCmd: record.attachCmd } : {}),
+    ...(record.attachLabel ? { attachLabel: record.attachLabel } : {})
   };
+}
+
+/** Validate the persisted state against the current iteration lifecycle states. */
+function normalizeAgentState(state: WorkspaceRecord["state"] | string): WorkspaceRecord["state"] {
+  switch (state) {
+    case "active":
+    case "failed":
+    case "starting":
+    case "stopped":
+      return state;
+    default:
+      throw new RevisError(`Workspace record is corrupted: invalid state ${String(state)}`);
+  }
+}
+
+/** Require one non-empty string field on a persisted workspace record. */
+function requireWorkspaceString(
+  record: Partial<WorkspaceRecord>,
+  field: "coordinationBranch" | "execCommand" | "localBranch" | "workspaceRoot"
+): string {
+  const value = record[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new RevisError(`Workspace record is corrupted: missing ${field}`);
+  }
+
+  return value;
+}
+
+/** Require one persisted workspace iteration counter. */
+function requireWorkspaceIteration(record: Partial<WorkspaceRecord>): number {
+  const { iteration } = record;
+  if (typeof iteration !== "number" || !Number.isInteger(iteration) || iteration < 0) {
+    throw new RevisError("Workspace record is corrupted: invalid iteration");
+  }
+
+  return iteration;
+}
+
+/** Require one valid persisted sandbox-provider value. */
+function requireSandboxProvider(
+  record: Partial<WorkspaceRecord>
+): WorkspaceRecord["sandboxProvider"] {
+  if (record.sandboxProvider === "local" || record.sandboxProvider === "daytona") {
+    return record.sandboxProvider;
+  }
+
+  throw new RevisError("Workspace record is corrupted: invalid sandboxProvider");
 }
 
 /** Keep participants ordered in natural agent order for the dashboard lanes. */

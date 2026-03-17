@@ -1,5 +1,6 @@
 /** IPC path helpers for the local Revis daemon. */
 
+import { tmpdir } from "node:os";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -12,7 +13,7 @@ export function daemonSocketPath(root: string): string {
     return `\\\\.\\pipe\\revis-${sha256Text(root).slice(0, 20)}`;
   }
 
-  return join(root, ".revis", "runtime", "daemon.sock");
+  return join(tmpdir(), `revis-${sha256Text(root).slice(0, 20)}.sock`);
 }
 
 /** Remove a Unix socket path when it exists. */

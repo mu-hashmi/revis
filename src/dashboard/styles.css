@@ -279,12 +279,12 @@ button {
   flex: 0 0 auto;
 }
 
-.filter-icon.kind-relay {
+.filter-icon.kind-iteration {
   transform: rotate(45deg);
   border-radius: 0.18rem;
 }
 
-.recent-kind.kind-relay {
+.recent-kind.kind-iteration {
   transform: rotate(45deg);
   border-radius: 0.18rem;
 }
@@ -454,18 +454,6 @@ button {
   stroke-width: 1;
 }
 
-.relay-arc {
-  fill: none;
-  stroke-width: 1.6;
-  opacity: 0.18;
-  stroke-dasharray: 5 7;
-}
-
-.relay-arc.is-active {
-  opacity: 0.82;
-  animation: relay-flow 1.15s linear infinite;
-}
-
 .timeline-lane {
   position: relative;
   height: 92px;
@@ -507,7 +495,7 @@ button {
     opacity 120ms ease;
 }
 
-.event-node.kind-relay::before {
+.event-node.kind-iteration::before {
   border-radius: 0.18rem;
   transform: rotate(45deg);
 }
@@ -526,8 +514,8 @@ button {
   box-shadow: 0 0 28px color-mix(in srgb, var(--event-color) 48%, transparent);
 }
 
-.event-node.kind-relay:hover::before,
-.event-node.kind-relay.is-active::before {
+.event-node.kind-iteration:hover::before,
+.event-node.kind-iteration.is-active::before {
   transform: rotate(45deg) scale(1.16);
 }
 
@@ -570,24 +558,14 @@ button {
   color: #7dd3fc;
 }
 
-.recent-kind.kind-relay,
-.detail-kind.kind-relay {
+.recent-kind.kind-iteration,
+.detail-kind.kind-iteration {
   color: #fdba74;
 }
 
 .recent-kind.kind-system,
 .detail-kind.kind-system {
   color: #9ca3af;
-}
-
-@keyframes relay-flow {
-  from {
-    stroke-dashoffset: 0;
-  }
-
-  to {
-    stroke-dashoffset: -24;
-  }
 }
 
 @media (max-width: 1120px) {
