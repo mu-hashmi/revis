@@ -2,6 +2,10 @@
 
 Revis is a coordination CLI for sandboxed coding agent workspaces. See README.md for more details.
 
+## Rules
+
+- NEVER change wording in README.md unless explicitly requested. You may only update the installation/usage/requirements if those change. If the product/functionality/behavior ever changes such that the README (or any docs) are now obsolete, surface this immediately. 
+
 ## Effect Best Practices
 
 **IMPORTANT:** Use the official Effect docs index at [https://effect.website/llms.txt](https://effect.website/llms.txt) and the local Effect source mirror before writing or reviewing Effect code.
