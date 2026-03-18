@@ -108,7 +108,7 @@ export const daemonControlLayer = Layer.effect(
       });
 
       return yield* waitForDaemonState(
-        store,
+        paths.daemonStateFile,
         config.sandboxProvider === "daytona" ? DAYTONA_START_TIMEOUT_MS : START_TIMEOUT_MS
       );
     });

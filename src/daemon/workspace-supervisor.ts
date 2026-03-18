@@ -199,10 +199,13 @@ export function makeWorkspaceSupervisors(
                     })
                   )
                 ),
-                Effect.zipRight(Effect.fail(error))
+                Effect.as(null)
               )
             )
           );
+          if (rebasedSha === null) {
+            return;
+          }
 
           snapshot = withState(
             snapshot,

@@ -7,11 +7,16 @@ import { extname, relative, resolve } from "node:path";
 import { HttpServerResponse } from "@effect/platform";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import { CommandError, DaemonUnavailableError, StorageError } from "../domain/errors";
+import {
+  CommandError,
+  DaemonUnavailableError,
+  StorageError,
+  storageError
+} from "../domain/errors";
 import { EventJournal } from "../services/event-journal";
-import type { WorkspaceStoreApi } from "../services/workspace-store";
 import { DaemonState } from "../domain/models";
 
 /** Bind the daemon HTTP server to an ephemeral localhost port. */
@@ -28,10 +33,14 @@ export function streamLiveEvents() {
     const eventJournal = yield* EventJournal;
     const backlog = yield* eventJournal.loadEvents(50);
     const encoder = new TextEncoder();
+
+    // Send one retry hint and the recent backlog first so new dashboard clients can render the
+    // current state immediately before they start consuming the live tail.
     const initial = Stream.fromIterable([
       encoder.encode("retry: 1000\n\n"),
       ...backlog.map((event) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
     ]);
+
     const updates = eventJournal.stream.pipe(
       Stream.map((event) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
     );
@@ -89,7 +98,7 @@ export function contentTypeForPath(path: string): string {
 }
 
 /** Return whether one daemon API base URL is responding. */
-export function daemonApiReady(apiBaseUrl: string): Effect.Effect<boolean, DaemonUnavailableError> {
+export function daemonApiReady(apiBaseUrl: string): Effect.Effect<boolean> {
   return Effect.tryPromise({
     try: async () => {
       const response = await fetch(`${apiBaseUrl}/health`, { cache: "no-store" });
@@ -108,7 +117,7 @@ export function postControl(
   apiBaseUrl: string,
   path: string,
   payload: Record<string, unknown>
-): Effect.Effect<void, DaemonUnavailableError | CommandError> {
+): Effect.Effect<void, CommandError> {
   return Effect.tryPromise({
     try: async () => {
       const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -119,6 +128,8 @@ export function postControl(
         body: JSON.stringify(payload)
       });
 
+      // Bubble the daemon's response body up into the command error so callers can show the
+      // transport-level validation failure directly.
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -133,24 +144,66 @@ export function postControl(
 
 /** Wait until the daemon has persisted a ready state and started serving. */
 export function waitForDaemonState(
-  store: WorkspaceStoreApi,
+  daemonStateFile: string,
   timeoutMs: number
 ): Effect.Effect<DaemonState, CommandError | StorageError> {
-  return Effect.gen(function* () {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      const daemon = yield* store.daemonState;
-      if (daemon && (yield* daemonApiReady(daemon.apiBaseUrl).pipe(Effect.orElseSucceed(() => false)))) {
+  function pollUntilReady(): Effect.Effect<DaemonState, StorageError> {
+    return Effect.gen(function* () {
+      // Keep the startup probe on Effect's own sleep/timeout operators so tests can control time
+      // with TestClock instead of depending on wall-clock `Date.now()` loops.
+      const daemon = yield* loadDaemonState(daemonStateFile);
+      if (daemon && (yield* daemonApiReady(daemon.apiBaseUrl))) {
         return daemon;
       }
 
       yield* Effect.sleep("100 millis");
-    }
-
-    return yield* CommandError.make({
-      command: "_daemon-run",
-      message: "Daemon did not persist a ready state in time"
+      return yield* pollUntilReady();
     });
-  });
+  }
+
+  return pollUntilReady().pipe(
+    Effect.timeoutFail({
+      duration: timeoutMs,
+      onTimeout: () =>
+        CommandError.make({
+          command: "_daemon-run",
+          message: "Daemon did not persist a ready state in time"
+        })
+    })
+  );
+}
+
+/** Read the persisted daemon state directly from disk so cross-process startup can observe it. */
+function loadDaemonState(path: string): Effect.Effect<DaemonState | null, StorageError> {
+  return Effect.tryPromise({
+    try: async () => {
+      // Startup races legitimately hit ENOENT before the daemon writes its first ready snapshot.
+      try {
+        return await readFile(path, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return null;
+        }
+
+        throw storageError(path, error instanceof Error ? error.message : String(error));
+      }
+    },
+    catch: (error) =>
+      typeof error === "object" &&
+      error !== null &&
+      "_tag" in error &&
+      error._tag === "StorageError"
+        ? (error as StorageError)
+        : storageError(path, error instanceof Error ? error.message : String(error))
+  }).pipe(
+    Effect.flatMap((payload) =>
+      payload === null
+        ? Effect.succeed(null)
+        : Schema.decodeUnknown(Schema.parseJson(DaemonState))(payload).pipe(
+            // Parse failures mean the daemon wrote an invalid snapshot; surface that as storage
+            // corruption instead of silently retrying forever.
+            Effect.mapError((error) => storageError(path, String(error)))
+          )
+    )
+  );
 }

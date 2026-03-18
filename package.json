@@ -39,8 +39,13 @@
     "build:dashboard": "node ./scripts/build-dashboard.mjs",
     "prepare": "effect-language-service patch",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --project contracts --project transport --project orchestration",
+    "test:acceptance": "npm run build && vitest run --project acceptance",
+    "test:all": "npm test && npm run test:acceptance",
+    "test:contracts": "vitest run --project contracts",
+    "test:transport": "vitest run --project transport",
+    "test:orchestration": "vitest run --project orchestration",
+    "test:watch": "vitest --project contracts --project transport --project orchestration",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -50,6 +55,7 @@
     "@effect/platform-node": "^0.93.0",
     "@effect/printer": "^0.47.0",
     "@effect/printer-ansi": "^0.47.0",
+    "@effect/typeclass": "^0.38.0",
     "effect": "^3.20.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

@@ -52,11 +52,15 @@ export const localWorkspaceProviderLayer = Layer.effect(
       const repoPath = paths.workspaceRepoDir(params.agentId);
       const logPath = paths.workspaceLogFile(params.agentId);
 
+      // Re-provisioning should start from a clean runtime directory so stale logs, exit files, or
+      // detached process artifacts never bleed into the new workspace.
       yield* Effect.tryPromise({
         try: () => rm(workspaceDir, { recursive: true, force: true }),
         catch: (error) => providerError("local", "remove workspace", String(error))
       });
 
+      // Clone from the coordination remote first, then switch to the workspace branch and stamp a
+      // distinct identity so later commits are attributable to this specific agent workspace.
       yield* hostGit.cloneWorkspaceRepo(
         params.remoteUrl,
         params.remoteName,
@@ -107,7 +111,9 @@ export const localWorkspaceProviderLayer = Layer.effect(
         catch: (error) => providerError("local", "open iteration log", String(error))
       });
 
-      // Spawn one detached shell so the workspace can keep running after the CLI exits.
+      // Spawn one detached shell so the workspace can keep running after the CLI exits. The shell
+      // wrapper persists the final exit code because the daemon may observe the session after the
+      // original CLI process is already gone.
       const child = spawn(
         shell,
         [
@@ -171,24 +177,28 @@ export const localWorkspaceProviderLayer = Layer.effect(
         );
       }
 
+      const exitPath = paths.workspaceExitFile(snapshot.agentId);
+
+      // Trust the persisted exit file before probing the pid. The child can exit and be reaped
+      // before `kill(pid, 0)` becomes authoritative, but the wrapper still leaves behind the final
+      // session status that the daemon needs.
+      if (yield* pathExists(exitPath)) {
+        const payload = yield* Effect.tryPromise({
+          try: () => readFile(exitPath, "utf8"),
+          catch: (error) => providerError("local", "read exit code", String(error))
+        });
+        const exitCode = Number.parseInt(payload.trim(), 10);
+
+        return Number.isFinite(exitCode)
+          ? ({ phase: "exited", exitCode } satisfies WorkspaceSessionStatus)
+          : ({ phase: "exited" } satisfies WorkspaceSessionStatus);
+      }
+
       if (processAlive(pid)) {
         return { phase: "running" } satisfies WorkspaceSessionStatus;
       }
 
-      const exitPath = paths.workspaceExitFile(snapshot.agentId);
-      if (!(yield* pathExists(exitPath))) {
-        return { phase: "missing" } satisfies WorkspaceSessionStatus;
-      }
-
-      const payload = yield* Effect.tryPromise({
-        try: () => readFile(exitPath, "utf8"),
-        catch: (error) => providerError("local", "read exit code", String(error))
-      });
-      const exitCode = Number.parseInt(payload.trim(), 10);
-
-      return Number.isFinite(exitCode)
-        ? ({ phase: "exited", exitCode } satisfies WorkspaceSessionStatus)
-        : ({ phase: "exited" } satisfies WorkspaceSessionStatus);
+      return { phase: "missing" } satisfies WorkspaceSessionStatus;
     });
 
     /** Tail the persisted local session log into a bounded list of activity lines. */
@@ -200,6 +210,8 @@ export const localWorkspaceProviderLayer = Layer.effect(
         return [];
       }
 
+      // Activity is just the bounded tail of the persisted session log; the daemon can call this
+      // repeatedly without worrying about growing unbounded output in memory.
       const payload = yield* Effect.tryPromise({
         try: () => readFile(logPath, "utf8"),
         catch: (error) => providerError("local", "read activity", String(error))
@@ -249,6 +261,8 @@ export const localWorkspaceProviderLayer = Layer.effect(
     const destroyWorkspace = Effect.fn("WorkspaceProvider.local.destroyWorkspace")(function* (
       snapshot: WorkspaceSnapshot
     ) {
+      // Shutdown should best-effort stop the detached process first, then remove the entire
+      // runtime directory tree so the next provision starts from a blank slate.
       yield* interruptIteration(snapshot).pipe(
         Effect.catchAll((error) =>
           error.action === "interrupt iteration" ? Effect.void : Effect.fail(error)
@@ -302,10 +316,16 @@ function localWrapperScript(execCommand: string, exitPath: string, iteration: nu
     `write_exit() { printf '%s\\n' \"$1\" > ${escapedExitPath}; }`,
     "trap 'write_exit 130; exit 130' INT",
     "trap 'write_exit 143; exit 143' TERM",
+    // Run the operator command in a subshell so explicit `exit` calls still flow back through
+    // the wrapper and persist a final session status for the daemon.
+    "(",
     execCommand,
-    "status=$?",
-    'write_exit "$status"',
-    'exit "$status"'
+    ")",
+    // Keep the wrapper's status variable out of the operator shell namespace because some shells,
+    // including zsh, reserve `status` for their own read-only process state.
+    "revis_status=$?",
+    'write_exit "$revis_status"',
+    'exit "$revis_status"'
   ].join("\n");
 }
 
@@ -316,11 +336,15 @@ function stopLocalProcess(pid: number): Effect.Effect<void, ReturnType<typeof pr
       return;
     }
 
+    // Ask the process to exit cleanly first so agent commands can flush logs and finish any final
+    // shell traps before the provider escalates to SIGKILL.
     yield* Effect.try({
       try: () => process.kill(pid, "SIGTERM"),
       catch: (error) => providerError("local", "interrupt iteration", String(error))
     });
 
+    // Poll for a short window before escalating. Detached children are host-level processes, so a
+    // small real-time wait is sufficient here and keeps teardown deterministic.
     const deadline = Date.now() + PROCESS_STOP_TIMEOUT_MS;
     while (processAlive(pid) && Date.now() < deadline) {
       yield* Effect.promise(() => sleep(50));
