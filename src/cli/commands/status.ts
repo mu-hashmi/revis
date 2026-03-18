@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 
 import type { ProjectAppServices } from "../../app/project-layer";
 import { DaemonControl } from "../../daemon/control";
-import type { StatusSnapshot } from "../../domain/models";
+import { StatusSnapshot } from "../../domain/models";
 import { loadStatusSnapshot } from "../../workflows/load-status";
 import { formatStatusSnapshot } from "../status-presenter";
 import { fetchJson, reportErrors, withProject, writeLine, type CliWriters } from "../runtime";
@@ -28,7 +28,7 @@ export function makeStatusCommand(io: CliWriters) {
 
     return yield* Effect.forever(
       Effect.gen(function* () {
-        const snapshot = yield* fetchJson<StatusSnapshot>(`${state.apiBaseUrl}/api/status`);
+        const snapshot = yield* fetchJson(`${state.apiBaseUrl}/api/status`, StatusSnapshot);
 
         yield* Effect.sync(() => {
           // Full redraw keeps watch mode simple because the rendered block changes height often.

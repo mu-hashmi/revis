@@ -14,6 +14,7 @@ import {
   CommandError,
   DaemonUnavailableError,
   StorageError,
+  ValidationError,
   storageError
 } from "../domain/errors";
 import { EventJournal } from "../services/event-journal";
@@ -57,7 +58,7 @@ export function streamLiveEvents() {
 
 /** Serve one static dashboard asset from disk. */
 export function respondStaticFile(path: string, contentType: string) {
-  return Effect.promise(() => readFile(path)).pipe(
+  return Effect.tryPromise(() => readFile(path)).pipe(
     Effect.map((payload) =>
       HttpServerResponse.uint8Array(payload, {
         contentType,
@@ -70,15 +71,20 @@ export function respondStaticFile(path: string, contentType: string) {
 }
 
 /** Resolve one dashboard asset path and reject traversal attempts. */
-export function resolveSafePath(baseDir: string, unsafePath: string): string {
-  const candidate = resolve(baseDir, `./${unsafePath}`);
-  const relativePath = relative(baseDir, candidate);
+export function resolveSafePath(
+  baseDir: string,
+  unsafePath: string
+): Effect.Effect<string, ValidationError> {
+  return Effect.gen(function* () {
+    const candidate = resolve(baseDir, `./${unsafePath}`);
+    const relativePath = relative(baseDir, candidate);
 
-  if (relativePath.startsWith("..") || relativePath === "") {
-    throw new Error(`Invalid dashboard path: ${unsafePath}`);
-  }
+    if (relativePath.startsWith("..") || relativePath === "") {
+      return yield* ValidationError.make({ message: `Invalid dashboard path: ${unsafePath}` });
+    }
 
-  return candidate;
+    return candidate;
+  });
 }
 
 /** Return a static content type for one dashboard asset path. */
@@ -100,8 +106,8 @@ export function contentTypeForPath(path: string): string {
 /** Return whether one daemon API base URL is responding. */
 export function daemonApiReady(apiBaseUrl: string): Effect.Effect<boolean> {
   return Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(`${apiBaseUrl}/health`, { cache: "no-store" });
+    try: async (signal) => {
+      const response = await fetch(`${apiBaseUrl}/health`, { cache: "no-store", signal });
       return response.ok;
     },
     catch: (error) =>
@@ -119,13 +125,14 @@ export function postControl(
   payload: Record<string, unknown>
 ): Effect.Effect<void, CommandError> {
   return Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const response = await fetch(`${apiBaseUrl}${path}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal
       });
 
       // Bubble the daemon's response body up into the command error so callers can show the
@@ -147,21 +154,23 @@ export function waitForDaemonState(
   daemonStateFile: string,
   timeoutMs: number
 ): Effect.Effect<DaemonState, CommandError | StorageError> {
-  function pollUntilReady(): Effect.Effect<DaemonState, StorageError> {
-    return Effect.gen(function* () {
-      // Keep the startup probe on Effect's own sleep/timeout operators so tests can control time
-      // with TestClock instead of depending on wall-clock `Date.now()` loops.
-      const daemon = yield* loadDaemonState(daemonStateFile);
-      if (daemon && (yield* daemonApiReady(daemon.apiBaseUrl))) {
-        return daemon;
-      }
+  const pollUntilReady = Effect.gen(function* () {
+    // Keep disk polling and readiness checks on Effect operators so tests can drive time with
+    // TestClock instead of wall-clock loops.
+    const daemon = yield* loadDaemonState(daemonStateFile);
+    if (daemon && (yield* daemonApiReady(daemon.apiBaseUrl))) {
+      return daemon;
+    }
 
-      yield* Effect.sleep("100 millis");
-      return yield* pollUntilReady();
-    });
-  }
+    yield* Effect.sleep("100 millis");
+    return null;
+  }).pipe(
+    Effect.repeat({
+      until: (daemon): daemon is DaemonState => daemon !== null
+    })
+  );
 
-  return pollUntilReady().pipe(
+  return pollUntilReady.pipe(
     Effect.timeoutFail({
       duration: timeoutMs,
       onTimeout: () =>

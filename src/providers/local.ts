@@ -7,7 +7,14 @@ import * as CommandExecutor from "@effect/platform/CommandExecutor";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { providerError } from "../domain/errors";
+import {
+  workspaceActivityError,
+  workspaceDestroyError,
+  workspaceInspectError,
+  workspaceInterruptError,
+  workspaceProvisionError,
+  workspaceStartError
+} from "../domain/errors";
 import {
   asBranchName,
   asRevision,
@@ -56,7 +63,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // detached process artifacts never bleed into the new workspace.
       yield* Effect.tryPromise({
         try: () => rm(workspaceDir, { recursive: true, force: true }),
-        catch: (error) => providerError("local", "remove workspace", String(error))
+        catch: (error) => workspaceProvisionError("local", String(error))
       });
 
       // Clone from the coordination remote first, then switch to the workspace branch and stamp a
@@ -80,7 +87,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       );
       yield* Effect.tryPromise({
         try: () => writeFile(logPath, "", "utf8"),
-        catch: (error) => providerError("local", "initialize log", String(error))
+        catch: (error) => workspaceProvisionError("local", String(error))
       });
 
       return {
@@ -103,60 +110,62 @@ export const localWorkspaceProviderLayer = Layer.effect(
 
       yield* Effect.tryPromise({
         try: () => Promise.all([writeFile(logPath, "", "utf8"), rm(exitPath, { force: true })]),
-        catch: (error) => providerError("local", "prepare iteration", String(error))
+        catch: (error) => workspaceStartError("local", String(error))
       });
 
-      const logHandle = yield* Effect.tryPromise({
-        try: () => open(logPath, "a"),
-        catch: (error) => providerError("local", "open iteration log", String(error))
-      });
+      return yield* Effect.acquireUseRelease(
+        Effect.tryPromise({
+          try: () => open(logPath, "a"),
+          catch: (error) => workspaceStartError("local", String(error))
+        }),
+        (logHandle) =>
+          Effect.gen(function* () {
+            // Spawn one detached shell so the workspace can keep running after the CLI exits. The
+            // wrapper persists the final exit code because the daemon may observe the session after
+            // the original CLI process is already gone.
+            const child = spawn(
+              shell,
+              [
+                "-lc",
+                localWrapperScript(
+                  snapshot.spec.execCommand,
+                  exitPath,
+                  workspaceIteration(snapshot) + 1
+                )
+              ],
+              {
+                cwd: snapshot.spec.workspaceRoot,
+                detached: true,
+                env: process.env,
+                stdio: ["ignore", logHandle.fd, logHandle.fd]
+              }
+            );
 
-      // Spawn one detached shell so the workspace can keep running after the CLI exits. The shell
-      // wrapper persists the final exit code because the daemon may observe the session after the
-      // original CLI process is already gone.
-      const child = spawn(
-        shell,
-        [
-          "-lc",
-          localWrapperScript(
-            snapshot.spec.execCommand,
-            exitPath,
-            workspaceIteration(snapshot) + 1
-          )
-        ],
-        {
-          cwd: snapshot.spec.workspaceRoot,
-          detached: true,
-          env: process.env,
-          stdio: ["ignore", logHandle.fd, logHandle.fd]
-        }
-      );
+            yield* Effect.tryPromise({
+              try: () =>
+                new Promise<void>((resolve, reject) => {
+                  child.once("spawn", () => resolve());
+                  child.once("error", reject);
+                }),
+              catch: (error) => workspaceStartError("local", String(error))
+            });
 
-      yield* Effect.tryPromise({
-        try: () =>
-          new Promise<void>((resolve, reject) => {
-            child.once("spawn", () => resolve());
-            child.once("error", reject);
+            child.unref();
+
+            if (!child.pid) {
+              return yield* workspaceStartError("local", `No pid returned for ${snapshot.agentId}`);
+            }
+
+            return asWorkspaceSessionId(String(child.pid));
           }),
-        catch: (error) => providerError("local", "start iteration", String(error))
-      });
-
-      yield* Effect.tryPromise({
-        try: () => logHandle.close(),
-        catch: (error) => providerError("local", "close iteration log", String(error))
-      });
-
-      child.unref();
-
-      if (!child.pid) {
-        return yield* providerError(
-          "local",
-          "start iteration",
-          `No pid returned for ${snapshot.agentId}`
-        );
-      }
-
-      return asWorkspaceSessionId(String(child.pid));
+        (logHandle) =>
+          Effect.tryPromise({
+            try: () => logHandle.close(),
+            catch: (error) => workspaceStartError("local", String(error))
+          })
+            // Closing the already-open log handle is cleanup, not a recoverable start failure.
+            .pipe(Effect.orDie)
+      );
     });
 
     /** Inspect the currently recorded detached process for one local workspace. */
@@ -170,11 +179,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
 
       const pid = Number.parseInt(sessionId, 10);
       if (!Number.isInteger(pid)) {
-        return yield* providerError(
-          "local",
-          "inspect session",
-          `Invalid local pid for ${snapshot.agentId}`
-        );
+        return yield* workspaceInspectError("local", `Invalid local pid for ${snapshot.agentId}`);
       }
 
       const exitPath = paths.workspaceExitFile(snapshot.agentId);
@@ -182,10 +187,10 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // Trust the persisted exit file before probing the pid. The child can exit and be reaped
       // before `kill(pid, 0)` becomes authoritative, but the wrapper still leaves behind the final
       // session status that the daemon needs.
-      if (yield* pathExists(exitPath)) {
+      if (yield* pathExists(exitPath, (error) => workspaceInspectError("local", String(error)))) {
         const payload = yield* Effect.tryPromise({
           try: () => readFile(exitPath, "utf8"),
-          catch: (error) => providerError("local", "read exit code", String(error))
+          catch: (error) => workspaceInspectError("local", String(error))
         });
         const exitCode = Number.parseInt(payload.trim(), 10);
 
@@ -206,7 +211,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       snapshot: WorkspaceSnapshot
     ) {
       const logPath = paths.workspaceLogFile(snapshot.agentId);
-      if (!(yield* pathExists(logPath))) {
+      if (!(yield* pathExists(logPath, (error) => workspaceActivityError("local", String(error))))) {
         return [];
       }
 
@@ -214,7 +219,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // repeatedly without worrying about growing unbounded output in memory.
       const payload = yield* Effect.tryPromise({
         try: () => readFile(logPath, "utf8"),
-        catch: (error) => providerError("local", "read activity", String(error))
+        catch: (error) => workspaceActivityError("local", String(error))
       });
 
       return payload
@@ -247,11 +252,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
 
       const pid = Number.parseInt(sessionId, 10);
       if (!Number.isInteger(pid)) {
-        return yield* providerError(
-          "local",
-          "interrupt iteration",
-          `Invalid local pid for ${snapshot.agentId}`
-        );
+        return yield* workspaceInterruptError("local", `Invalid local pid for ${snapshot.agentId}`);
       }
 
       yield* stopLocalProcess(pid);
@@ -264,14 +265,12 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // Shutdown should best-effort stop the detached process first, then remove the entire
       // runtime directory tree so the next provision starts from a blank slate.
       yield* interruptIteration(snapshot).pipe(
-        Effect.catchAll((error) =>
-          error.action === "interrupt iteration" ? Effect.void : Effect.fail(error)
-        )
+        Effect.catchTag("WorkspaceInterruptError", () => Effect.void)
       );
 
       yield* Effect.tryPromise({
         try: () => rm(paths.workspaceRuntimeDir(snapshot.agentId), { recursive: true, force: true }),
-        catch: (error) => providerError("local", "destroy workspace", String(error))
+        catch: (error) => workspaceDestroyError("local", String(error))
       });
     });
 
@@ -291,18 +290,24 @@ export const localWorkspaceProviderLayer = Layer.effect(
 );
 
 /** Return whether one file exists on disk. */
-function pathExists(path: string): Effect.Effect<boolean, never> {
-  return Effect.promise(async () => {
-    try {
-      await access(path);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return false;
-      }
+function pathExists<E>(
+  path: string,
+  onError: (error: unknown) => E
+): Effect.Effect<boolean, E> {
+  return Effect.tryPromise({
+    try: async () => {
+      try {
+        await access(path);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return false;
+        }
 
-      throw error;
-    }
+        throw error;
+      }
+    },
+    catch: onError
   });
 }
 
@@ -330,7 +335,7 @@ function localWrapperScript(execCommand: string, exitPath: string, iteration: nu
 }
 
 /** Send TERM first, then KILL if the detached process refuses to exit. */
-function stopLocalProcess(pid: number): Effect.Effect<void, ReturnType<typeof providerError>> {
+function stopLocalProcess(pid: number) {
   return Effect.gen(function* () {
     if (!processAlive(pid)) {
       return;
@@ -340,7 +345,7 @@ function stopLocalProcess(pid: number): Effect.Effect<void, ReturnType<typeof pr
     // shell traps before the provider escalates to SIGKILL.
     yield* Effect.try({
       try: () => process.kill(pid, "SIGTERM"),
-      catch: (error) => providerError("local", "interrupt iteration", String(error))
+      catch: (error) => workspaceInterruptError("local", String(error))
     });
 
     // Poll for a short window before escalating. Detached children are host-level processes, so a
@@ -353,7 +358,7 @@ function stopLocalProcess(pid: number): Effect.Effect<void, ReturnType<typeof pr
     if (processAlive(pid)) {
       yield* Effect.try({
         try: () => process.kill(pid, "SIGKILL"),
-        catch: (error) => providerError("local", "interrupt iteration", String(error))
+        catch: (error) => workspaceInterruptError("local", String(error))
       });
     }
   });

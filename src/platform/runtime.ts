@@ -3,8 +3,13 @@
 import { readFile } from "node:fs/promises";
 
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { CommandError } from "../domain/errors";
+
+const PackageJson = Schema.Struct({
+  version: Schema.String
+});
 
 /** Load the packaged Revis version from `package.json`. */
 export function packageVersion(): Effect.Effect<string, CommandError> {
@@ -12,7 +17,11 @@ export function packageVersion(): Effect.Effect<string, CommandError> {
 
   return Effect.tryPromise({
     try: async () => {
-      const payload = JSON.parse(await readFile(packageJsonUrl, "utf8")) as { version: string };
+      // Read and decode the packaged manifest in one place so CLI version reporting stays aligned
+      // with the built artifact, not the caller's working directory.
+      const payload = Schema.decodeUnknownSync(Schema.parseJson(PackageJson))(
+        await readFile(packageJsonUrl, "utf8")
+      );
       return payload.version;
     },
     catch: (error) =>

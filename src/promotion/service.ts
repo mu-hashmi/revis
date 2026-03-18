@@ -6,6 +6,7 @@ import * as PlatformPath from "@effect/platform/Path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import { ConfigError, StorageError, ValidationError } from "../domain/errors";
 import { Promoted, PullRequestRef, type WorkspaceSnapshot } from "../domain/models";
@@ -108,9 +109,10 @@ function requirePromotionWorkspace(
 ): Effect.Effect<WorkspaceSnapshot, ValidationError | StorageError> {
   return store.get(agentId).pipe(
     Effect.flatMap((snapshot) =>
-      snapshot
-        ? Effect.succeed(snapshot)
-        : Effect.fail(ValidationError.make({ message: `Unknown workspace ${agentId}` }))
+      Option.match(snapshot, {
+        onNone: () => Effect.fail(ValidationError.make({ message: `Unknown workspace ${agentId}` })),
+        onSome: Effect.succeed
+      })
     )
   );
 }

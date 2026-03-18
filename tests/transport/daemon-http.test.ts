@@ -65,19 +65,20 @@ describe("daemon HTTP transport", () => {
 
           // Drive one invalid request through raw fetch to prove the route-level schema check is
           // still visible over HTTP.
-          const invalid = yield* Effect.promise(() =>
+          const invalid = yield* Effect.tryPromise((signal) =>
             fetch(`${baseUrl}/api/control/reconcile`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json"
               },
-              body: JSON.stringify({ reason: "poll" })
+              body: JSON.stringify({ reason: "poll" }),
+              signal
             })
           ).pipe(Effect.orDie);
-          const text = yield* Effect.promise(() => awaitText(invalid)).pipe(Effect.orDie);
+          const text = yield* Effect.tryPromise(() => awaitText(invalid)).pipe(Effect.orDie);
 
           expect(invalid.status).toBe(400);
-          expect(text).toContain("Invalid reconcile reason");
+          expect(text).toContain("reason");
         }).pipe(Effect.provide(Layer.merge(NodeContext.layer, harness.layer)))
       )
     )
@@ -117,11 +118,12 @@ describe("daemon HTTP transport", () => {
           yield* journal.append(backlog);
           yield* Effect.forkScoped(server.serve(router));
 
-          const response = yield* Effect.promise(() =>
+          const response = yield* Effect.tryPromise((signal) =>
             fetch(`${baseUrl}/api/events/stream`, {
               headers: {
                 Accept: "text/event-stream"
-              }
+              },
+              signal
             })
           ).pipe(Effect.orDie);
           const reader = response.body?.getReader();
@@ -130,13 +132,13 @@ describe("daemon HTTP transport", () => {
             return yield* Effect.dieMessage("Missing SSE response body");
           }
 
-          const backlogPayload = yield* Effect.promise(() => readSseChunks(reader, 2)).pipe(
+          const backlogPayload = yield* Effect.tryPromise(() => readSseChunks(reader, 2)).pipe(
             Effect.orDie
           );
 
           yield* journal.append(live);
 
-          const livePayload = yield* Effect.promise(() => readSseChunks(reader, 1)).pipe(
+          const livePayload = yield* Effect.tryPromise(() => readSseChunks(reader, 1)).pipe(
             Effect.orDie
           );
           const payload = backlogPayload + livePayload;
@@ -146,7 +148,7 @@ describe("daemon HTTP transport", () => {
           expect(payload).toContain("retry: 1000");
           expect(events).toStrictEqual([backlog, live]);
 
-          yield* Effect.promise(() => reader.cancel()).pipe(Effect.orDie);
+          yield* Effect.tryPromise(() => reader.cancel()).pipe(Effect.orDie);
         }).pipe(Effect.provide(Layer.merge(NodeContext.layer, harness.layer)))
       )
     )

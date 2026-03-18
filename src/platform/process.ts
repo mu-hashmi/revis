@@ -145,7 +145,7 @@ export function spawnReadyProcess(
   argv: string[],
   options: ReadyProcessOptions
 ): Effect.Effect<number, CommandError> {
-  return Effect.async<number, CommandError>((resume) => {
+  return Effect.async<number, CommandError>((resume, signal) => {
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd: options.cwd,
       env: options.env ?? process.env,
@@ -153,7 +153,7 @@ export function spawnReadyProcess(
       stdio: ["ignore", "pipe", "pipe"]
     });
 
-    void waitForReadySignal(argv, child, options)
+    void waitForReadySignal(argv, child, options, signal)
       .then((pid) => resume(Effect.succeed(pid)))
       .catch((error) =>
         resume(
@@ -164,7 +164,11 @@ export function spawnReadyProcess(
         )
       );
 
-    return Effect.sync(() => undefined);
+    // If startup is interrupted before the ready marker arrives, tear the detached child down so
+    // the daemon does not leak a background process that nobody owns anymore.
+    return Effect.sync(() => {
+      terminateChildProcess(child);
+    });
   });
 }
 
@@ -239,16 +243,33 @@ function shellEscape(part: string): string {
 async function waitForReadySignal(
   argv: string[],
   child: ChildProcessByStdio<null, Readable, Readable>,
-  options: ReadyProcessOptions
+  options: ReadyProcessOptions,
+  signal: AbortSignal
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
 
+    // One cleanup path keeps timers, listeners, and stdio teardown aligned across success,
+    // timeout, startup failure, and interruption.
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      child.stdout.removeListener("data", onStdout);
+      child.stderr.removeListener("data", onStderr);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+
     // Time out if the child never announces that it is ready to serve.
     const timer = setTimeout(() => {
-      settle(() => reject(new Error(`${shellJoin(argv)} did not become ready in time`)));
+      settle(() => {
+        terminateChildProcess(child);
+        reject(new Error(`${shellJoin(argv)} did not become ready in time`));
+      });
     }, options.timeoutMs);
 
     // One shared completion path keeps timer and stream cleanup in sync.
@@ -258,38 +279,76 @@ async function waitForReadySignal(
       }
 
       settled = true;
-      clearTimeout(timer);
-      child.stdout.destroy();
-      child.stderr.destroy();
+      cleanup();
       fn();
     };
 
-    // Buffer stdout and stderr so early exits surface the real daemon failure.
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
+    // Interruption means the caller gave up on startup, so the detached child should not keep
+    // booting in the background.
+    const onAbort = (): void => {
+      settle(() => {
+        terminateChildProcess(child);
+        reject(new Error(`${shellJoin(argv)} startup interrupted`));
+      });
+    };
+
+    const onStdout = (chunk: string): void => {
       stdout += chunk;
       if (stdout.includes(options.readyLine)) {
         child.unref();
-        settle(() => resolve(child.pid ?? 0));
+        settle(() => {
+          if (child.pid === undefined) {
+            reject(new Error(`${shellJoin(argv)} started without a pid`));
+            return;
+          }
+
+          resolve(child.pid);
+        });
       }
-    });
-    child.stderr.on("data", (chunk: string) => {
+    };
+
+    const onStderr = (chunk: string): void => {
       stderr += chunk;
-    });
-    child.once("error", (error) => {
+    };
+
+    const onError = (error: Error): void => {
       settle(() => reject(error));
-    });
-    child.once("close", (_code, signal) => {
+    };
+
+    const onClose = (_code: number | null, closeSignal: NodeJS.Signals | null): void => {
       settle(() =>
         reject(
           new Error(
             stderr.trim() ||
               stdout.trim() ||
-              `${shellJoin(argv)} exited before ready${signal ? ` (${signal})` : ""}`
+              `${shellJoin(argv)} exited before ready${closeSignal ? ` (${closeSignal})` : ""}`
           )
         )
       );
-    });
+    };
+
+    // Buffer stdout and stderr so early exits surface the real daemon failure.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("error", onError);
+    child.once("close", onClose);
   });
+}
+
+    /** Terminate one not-yet-ready detached child process. */
+function terminateChildProcess(child: ChildProcessByStdio<null, Readable, Readable>): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  child.kill("SIGTERM");
 }

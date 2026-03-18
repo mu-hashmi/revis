@@ -6,7 +6,15 @@ import { Daytona, type Sandbox } from "@daytonaio/sdk";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { providerError } from "../domain/errors";
+import {
+  workspaceActivityError,
+  workspaceCommandError,
+  workspaceDestroyError,
+  workspaceInspectError,
+  workspaceInterruptError,
+  workspaceProvisionError,
+  workspaceStartError
+} from "../domain/errors";
 import {
   asBranchName,
   asRevision,
@@ -36,6 +44,14 @@ const TERM_ENV = {
   TERM: "xterm-256color"
 } as const;
 
+const daytonaProvisionError = (message: string) => workspaceProvisionError("daytona", message);
+const daytonaStartError = (message: string) => workspaceStartError("daytona", message);
+const daytonaInspectError = (message: string) => workspaceInspectError("daytona", message);
+const daytonaActivityError = (message: string) => workspaceActivityError("daytona", message);
+const daytonaCommandError = (message: string) => workspaceCommandError("daytona", message);
+const daytonaInterruptError = (message: string) => workspaceInterruptError("daytona", message);
+const daytonaDestroyError = (message: string) => workspaceDestroyError("daytona", message);
+
 export const daytonaWorkspaceProviderLayer = Layer.effect(
   WorkspaceProvider,
   Effect.gen(function* () {
@@ -53,7 +69,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
     const provision = Effect.fn("WorkspaceProvider.daytona.provision")(function* (
       params: ProvisionWorkspaceParams
     ) {
-      yield* assertRemoteUrlSupported(params.remoteUrl);
+      yield* assertRemoteUrlSupported(params.remoteUrl, daytonaProvisionError);
 
       const sandbox = yield* Effect.tryPromise({
         try: () =>
@@ -65,22 +81,27 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
             autoDeleteInterval: -1,
             ephemeral: false
           }),
-        catch: (error) => providerError("daytona", "create sandbox", String(error))
+        catch: (error) => daytonaProvisionError(String(error))
       });
 
       yield* Effect.tryPromise({
         try: () => sandbox.setAutostopInterval(0),
-        catch: (error) => providerError("daytona", "disable autostop", String(error))
+        catch: (error) => daytonaProvisionError(String(error))
       });
 
-      const workDir = yield* requireSandboxWorkspaceRoot(sandbox);
+      const workDir = yield* requireSandboxWorkspaceRoot(sandbox, daytonaProvisionError);
       const workspaceRoot = pathPosix.join(workDir, "revis", params.agentId, "repo");
       const parentDir = pathPosix.dirname(workspaceRoot);
 
-      yield* runSandboxCommand(sandbox, shellJoin(["mkdir", "-p", parentDir]), undefined);
+      yield* runSandboxCommand(
+        sandbox,
+        shellJoin(["mkdir", "-p", parentDir]),
+        undefined,
+        daytonaProvisionError
+      );
       yield* Effect.tryPromise({
         try: () => sandbox.git.clone(params.remoteUrl, workspaceRoot, params.syncBranch),
-        catch: (error) => providerError("daytona", "clone workspace", String(error))
+        catch: (error) => daytonaProvisionError(String(error))
       });
       yield* runSandboxCommand(
         sandbox,
@@ -91,12 +112,14 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
           params.coordinationBranch,
           `${params.remoteName}/${params.syncBranch}`
         ]),
-        workspaceRoot
+        workspaceRoot,
+        daytonaProvisionError
       );
       yield* runSandboxCommand(
         sandbox,
         shellJoin(["git", "config", "user.name", `${params.operatorSlug}-${params.agentId}`]),
-        workspaceRoot
+        workspaceRoot,
+        daytonaProvisionError
       );
       yield* runSandboxCommand(
         sandbox,
@@ -106,13 +129,16 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
           "user.email",
           workspaceEmail(params.operatorSlug, params.agentId)
         ]),
-        workspaceRoot
+        workspaceRoot,
+        daytonaProvisionError
       );
 
       return {
         workspaceRoot,
-        localBranch: asBranchName(yield* sandboxCurrentBranch(sandbox, workspaceRoot)),
-        head: asRevision(yield* sandboxHeadSha(sandbox, workspaceRoot)),
+        localBranch: asBranchName(
+          yield* sandboxCurrentBranch(sandbox, workspaceRoot, daytonaProvisionError)
+        ),
+        head: asRevision(yield* sandboxHeadSha(sandbox, workspaceRoot, daytonaProvisionError)),
         attachLabel: `daytona:${sandbox.id}`,
         sandboxId: sandbox.id
       } satisfies ProvisionedWorkspace;
@@ -122,11 +148,11 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
     const startIteration = Effect.fn("WorkspaceProvider.daytona.startIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
-      const sandbox = yield* getSandbox(getDaytona, snapshot);
+      const sandbox = yield* getSandbox(getDaytona, snapshot, daytonaStartError);
 
       yield* Effect.tryPromise({
         try: () => sandbox.start(60),
-        catch: (error) => providerError("daytona", "start sandbox", String(error))
+        catch: (error) => daytonaStartError(String(error))
       });
 
       const sessionId = asWorkspaceSessionId(
@@ -135,7 +161,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
 
       yield* Effect.tryPromise({
         try: () => sandbox.process.createSession(sessionId),
-        catch: (error) => providerError("daytona", "create session", String(error))
+        catch: (error) => daytonaStartError(String(error))
       });
       yield* Effect.tryPromise({
         try: () =>
@@ -154,7 +180,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
             },
             0
           ),
-        catch: (error) => providerError("daytona", "start iteration", String(error))
+        catch: (error) => daytonaStartError(String(error))
       });
 
       return sessionId;
@@ -169,7 +195,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
         return { phase: "missing" } satisfies WorkspaceSessionStatus;
       }
 
-      const command = yield* latestSessionCommand(getDaytona, snapshot);
+      const command = yield* latestSessionCommand(getDaytona, snapshot, daytonaInspectError);
       if (command.exitCode === undefined) {
         return { phase: "running" } satisfies WorkspaceSessionStatus;
       }
@@ -189,11 +215,11 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
         return [];
       }
 
-      const sandbox = yield* getSandbox(getDaytona, snapshot);
-      const command = yield* latestSessionCommand(getDaytona, snapshot);
+      const sandbox = yield* getSandbox(getDaytona, snapshot, daytonaActivityError);
+      const command = yield* latestSessionCommand(getDaytona, snapshot, daytonaActivityError);
       const logs = yield* Effect.tryPromise({
         try: () => sandbox.process.getSessionCommandLogs(sessionId, command.id),
-        catch: (error) => providerError("daytona", "read activity", String(error))
+        catch: (error) => daytonaActivityError(String(error))
       });
 
       return `${logs.stdout ?? ""}${logs.stderr ?? ""}`
@@ -209,7 +235,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       argv: ReadonlyArray<string>,
       options: RunCommandOptions = {}
     ) {
-      const sandbox = yield* getSandbox(getDaytona, snapshot);
+      const sandbox = yield* getSandbox(getDaytona, snapshot, daytonaCommandError);
       const response = yield* Effect.tryPromise({
         try: () =>
           sandbox.process.executeCommand(
@@ -218,7 +244,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
             nodeEnvToStringMap(options.env),
             0
           ),
-        catch: (error) => providerError("daytona", "run command", String(error))
+        catch: (error) => daytonaCommandError(String(error))
       });
 
       const completed: CompletedCommand = {
@@ -228,11 +254,7 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
       };
 
       if ((options.check ?? true) && completed.exitCode !== 0) {
-        return yield* providerError(
-          "daytona",
-          "run command",
-          completed.stdout.trim() || "command failed"
-        );
+        return yield* daytonaCommandError(completed.stdout.trim() || "command failed");
       }
 
       return completed;
@@ -247,10 +269,10 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
         return;
       }
 
-      const sandbox = yield* getSandbox(getDaytona, snapshot);
+      const sandbox = yield* getSandbox(getDaytona, snapshot, daytonaInterruptError);
       yield* Effect.tryPromise({
         try: () => sandbox.process.deleteSession(sessionId),
-        catch: (error) => providerError("daytona", "interrupt iteration", String(error))
+        catch: (error) => daytonaInterruptError(String(error))
       });
     });
 
@@ -258,16 +280,14 @@ export const daytonaWorkspaceProviderLayer = Layer.effect(
     const destroyWorkspace = Effect.fn("WorkspaceProvider.daytona.destroyWorkspace")(function* (
       snapshot: WorkspaceSnapshot
     ) {
-      const sandbox = yield* getSandbox(getDaytona, snapshot);
+      const sandbox = yield* getSandbox(getDaytona, snapshot, daytonaDestroyError);
 
       yield* interruptIteration(snapshot).pipe(
-        Effect.catchAll((error) =>
-          error.action === "interrupt iteration" ? Effect.void : Effect.fail(error)
-        )
+        Effect.catchTag("WorkspaceInterruptError", () => Effect.void)
       );
       yield* Effect.tryPromise({
         try: () => sandbox.delete(),
-        catch: (error) => providerError("daytona", "destroy workspace", String(error))
+        catch: (error) => daytonaDestroyError(String(error))
       });
     });
 
@@ -311,9 +331,10 @@ function daytonaTermEnv(): string[] {
 }
 
 /** Return the root directory Revis should use inside one sandbox. */
-function requireSandboxWorkspaceRoot(
-  sandbox: Sandbox
-): Effect.Effect<string, ReturnType<typeof providerError>> {
+function requireSandboxWorkspaceRoot<E>(
+  sandbox: Sandbox,
+  onError: (message: string) => E
+) {
   return Effect.tryPromise({
     try: async () => {
       const workDir = (await sandbox.getWorkDir()) ?? (await sandbox.getUserHomeDir());
@@ -323,19 +344,18 @@ function requireSandboxWorkspaceRoot(
 
       return workDir;
     },
-    catch: (error) => providerError("daytona", "resolve workdir", String(error))
+    catch: (error) => onError(String(error))
   });
 }
 
 /** Fail loudly when the configured remote is not reachable from Daytona. */
-function assertRemoteUrlSupported(
-  remoteUrl: string
-): Effect.Effect<void, ReturnType<typeof providerError>> {
+function assertRemoteUrlSupported<E>(
+  remoteUrl: string,
+  onError: (message: string) => E
+) {
   if (remoteUrl.startsWith("/") || remoteUrl.startsWith(".")) {
     return Effect.fail(
-      providerError(
-        "daytona",
-        "validate remote",
+      onError(
         "Daytona requires a network-accessible git remote. Local revis-local paths are not supported."
       )
     );
@@ -363,24 +383,30 @@ function nodeEnvToStringMap(
 }
 
 /** Return the current HEAD SHA inside one sandbox checkout. */
-function sandboxHeadSha(
+function sandboxHeadSha<E>(
   sandbox: Sandbox,
-  workspaceRoot: string
-): Effect.Effect<string, ReturnType<typeof providerError>> {
-  return runSandboxCommand(sandbox, shellJoin(["git", "rev-parse", "HEAD"]), workspaceRoot).pipe(
-    Effect.map((response) => response.stdout.trim())
-  );
+  workspaceRoot: string,
+  onError: (message: string) => E
+) {
+  return runSandboxCommand(
+    sandbox,
+    shellJoin(["git", "rev-parse", "HEAD"]),
+    workspaceRoot,
+    onError
+  ).pipe(Effect.map((response) => response.stdout.trim()));
 }
 
 /** Return the current checked-out branch inside one sandbox checkout. */
-function sandboxCurrentBranch(
+function sandboxCurrentBranch<E>(
   sandbox: Sandbox,
-  workspaceRoot: string
-): Effect.Effect<string, ReturnType<typeof providerError>> {
+  workspaceRoot: string,
+  onError: (message: string) => E
+) {
   return runSandboxCommand(
     sandbox,
     shellJoin(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
-    workspaceRoot
+    workspaceRoot,
+    onError
   ).pipe(
     Effect.flatMap((response) => {
       const branch = response.stdout.trim();
@@ -388,62 +414,48 @@ function sandboxCurrentBranch(
         return Effect.succeed(branch);
       }
 
-      return Effect.fail(
-        providerError("daytona", "read branch", "Could not determine current branch")
-      );
+      return Effect.fail(onError("Could not determine current branch"));
     })
   );
 }
 
 /** Resolve one Daytona sandbox from snapshot metadata. */
-function getSandbox(
+function getSandbox<E>(
   getDaytona: () => Daytona,
-  snapshot: WorkspaceSnapshot
-): Effect.Effect<Sandbox, ReturnType<typeof providerError>> {
+  snapshot: WorkspaceSnapshot,
+  onError: (message: string) => E
+) {
   if (!snapshot.spec.sandboxId) {
-    return Effect.fail(
-      providerError(
-        "daytona",
-        "resolve sandbox",
-        `Missing sandbox metadata for ${snapshot.agentId}`
-      )
-    );
+    return Effect.fail(onError(`Missing sandbox metadata for ${snapshot.agentId}`));
   }
 
   return Effect.tryPromise({
     try: () => getDaytona().get(snapshot.spec.sandboxId!),
-    catch: (error) => providerError("daytona", "resolve sandbox", String(error))
+    catch: (error) => onError(String(error))
   });
 }
 
 /** Return the latest command entry for one Daytona session. */
-function latestSessionCommand(
+function latestSessionCommand<E>(
   getDaytona: () => Daytona,
-  snapshot: WorkspaceSnapshot
-): Effect.Effect<{ readonly id: string; readonly exitCode?: number }, ReturnType<typeof providerError>> {
+  snapshot: WorkspaceSnapshot,
+  onError: (message: string) => E
+) {
   return Effect.gen(function* () {
     const sessionId = workspaceCurrentSessionId(snapshot);
     if (!sessionId) {
-      return yield* providerError(
-        "daytona",
-        "inspect session",
-        `Missing session metadata for ${snapshot.agentId}`
-      );
+      return yield* Effect.fail(onError(`Missing session metadata for ${snapshot.agentId}`));
     }
 
-    const sandbox = yield* getSandbox(getDaytona, snapshot);
+    const sandbox = yield* getSandbox(getDaytona, snapshot, onError);
     const session = yield* Effect.tryPromise({
       try: () => sandbox.process.getSession(sessionId),
-      catch: (error) => providerError("daytona", "inspect session", String(error))
+      catch: (error) => onError(String(error))
     });
     const command = session.commands?.at(-1);
 
     if (!command) {
-      return yield* providerError(
-        "daytona",
-        "inspect session",
-        `Session ${sessionId} has no command history`
-      );
+      return yield* Effect.fail(onError(`Session ${sessionId} has no command history`));
     }
 
     return command;
@@ -451,14 +463,15 @@ function latestSessionCommand(
 }
 
 /** Execute one synchronous sandbox command and surface failures loudly. */
-function runSandboxCommand(
+function runSandboxCommand<E>(
   sandbox: Sandbox,
   command: string,
-  cwd: string | undefined
-): Effect.Effect<CompletedCommand, ReturnType<typeof providerError>> {
+  cwd: string | undefined,
+  onError: (message: string) => E
+) {
   return Effect.tryPromise({
     try: () => sandbox.process.executeCommand(command, cwd, undefined, 0),
-    catch: (error) => providerError("daytona", "run command", String(error))
+    catch: (error) => onError(String(error))
   }).pipe(
     Effect.flatMap((response) => {
       const completed: CompletedCommand = {
@@ -468,9 +481,7 @@ function runSandboxCommand(
       };
 
       if (completed.exitCode !== 0) {
-        return Effect.fail(
-          providerError("daytona", "run command", completed.stdout.trim() || "command failed")
-        );
+        return Effect.fail(onError(completed.stdout.trim() || "command failed"));
       }
 
       return Effect.succeed(completed);

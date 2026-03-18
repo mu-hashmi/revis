@@ -26,23 +26,23 @@ describe("Revis CLI acceptance", () => {
     withAcceptanceProject("revis-accept-init-", ({ root, paths }) =>
       Effect.gen(function* () {
         // Initialize Revis and collect the on-disk artifacts it is expected to own.
-        const result = yield* Effect.promise(() => runCli(["init"], { cwd: root })).pipe(
+        const result = yield* Effect.tryPromise(() => runCli(["init"], { cwd: root })).pipe(
           Effect.orDie
         );
-        const config = yield* Effect.promise(async () => {
+        const config = yield* Effect.tryPromise(async () => {
           const payload = await readJsonFile<unknown>(paths.configFile);
           return Schema.decodeUnknownSync(RevisConfig)(payload);
         }).pipe(Effect.orDie);
-        const gitignore = yield* Effect.promise(() =>
+        const gitignore = yield* Effect.tryPromise(() =>
           readFile(`${root}/.gitignore`, "utf8")
         ).pipe(Effect.orDie);
-        const expectedRemotePath = yield* Effect.promise(() =>
+        const expectedRemotePath = yield* Effect.tryPromise(() =>
           realpath(`${root}/.revis/coordination.git`)
         ).pipe(Effect.orDie);
-        const remoteUrl = yield* Effect.promise(() =>
+        const remoteUrl = yield* Effect.tryPromise(() =>
           runGit(root, ["remote", "get-url", "revis-local"])
         ).pipe(Effect.orDie);
-        const trunkHead = yield* Effect.promise(() =>
+        const trunkHead = yield* Effect.tryPromise(() =>
           runGit(root, [
             "--git-dir",
             `${root}/.revis/coordination.git`,
@@ -76,8 +76,8 @@ describe("Revis CLI acceptance", () => {
     withAcceptanceProject("revis-accept-spawn-", ({ root }) =>
       Effect.gen(function* () {
         // Start a real daemon and two bounded local sessions.
-        yield* Effect.promise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() =>
           runCli(["spawn", "--exec", writeAndSleepFixture(".revis-test/running.log", 3), "2"], {
             cwd: root
           })
@@ -106,8 +106,8 @@ describe("Revis CLI acceptance", () => {
       Effect.gen(function* () {
         // Use a bounded commit-and-exit fixture so the daemon must observe one clean exit and one
         // restart without the test hanging on a long-lived process.
-        yield* Effect.promise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() =>
           runCli(["spawn", "--exec", commitAndExitFixture("acceptance work"), "1"], { cwd: root })
         ).pipe(Effect.orDie);
 
@@ -145,8 +145,8 @@ describe("Revis CLI acceptance", () => {
     withAcceptanceProject("revis-accept-stop-", ({ root, paths }) =>
       Effect.gen(function* () {
         // Start one long enough-lived workspace so `stop --all` has real runtime state to clean up.
-        yield* Effect.promise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() =>
           runCli(["spawn", "--exec", writeAndSleepFixture(".revis-test/hold.log", 30), "1"], {
             cwd: root
           })
@@ -163,8 +163,8 @@ describe("Revis CLI acceptance", () => {
 
         // Verify shutdown by polling the persisted daemon/runtime state instead of relying on a
         // fixed sleep. The daemon can exit at slightly different times across machines.
-        yield* Effect.promise(() => runCli(["stop", "--all"], { cwd: root })).pipe(Effect.orDie);
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() => runCli(["stop", "--all"], { cwd: root })).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() =>
           waitUntil(
             async () =>
               !existsSync(paths.daemonStateFile) &&
@@ -176,7 +176,7 @@ describe("Revis CLI acceptance", () => {
           )
         ).pipe(Effect.orDie);
 
-        const status = yield* Effect.promise(() => runCli(["status"], { cwd: root })).pipe(
+        const status = yield* Effect.tryPromise(() => runCli(["status"], { cwd: root })).pipe(
           Effect.orDie
         );
 
@@ -192,9 +192,9 @@ describe("Revis CLI acceptance", () => {
         const branch = workspaceBranch("tester", asAgentId("agent-1"));
 
         // Capture the managed trunk ref before any workspace work happens.
-        yield* Effect.promise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() => runCli(["init"], { cwd: root })).pipe(Effect.orDie);
 
-        const trunkBefore = yield* Effect.promise(() =>
+        const trunkBefore = yield* Effect.tryPromise(() =>
           runGit(root, [
             "--git-dir",
             `${paths.revisDir}/coordination.git`,
@@ -204,7 +204,7 @@ describe("Revis CLI acceptance", () => {
         ).pipe(Effect.orDie);
 
         // Wait for the workspace branch to exist on the coordination remote before promoting it.
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() =>
           runCli(["spawn", "--exec", commitAndExitFixture("promotion work"), "1"], { cwd: root })
         ).pipe(Effect.orDie);
         yield* waitForStatuses(
@@ -215,7 +215,7 @@ describe("Revis CLI acceptance", () => {
           },
           15_000
         );
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() =>
           waitUntil(async () => {
             const branchRef = await runGit(root, [
               "--git-dir",
@@ -229,10 +229,10 @@ describe("Revis CLI acceptance", () => {
         ).pipe(Effect.orDie);
 
         // Promotion should advance trunk and make the workspace branch an ancestor of it.
-        const result = yield* Effect.promise(() => runCli(["promote", "agent-1"], { cwd: root })).pipe(
+        const result = yield* Effect.tryPromise(() => runCli(["promote", "agent-1"], { cwd: root })).pipe(
           Effect.orDie
         );
-        const trunkAfter = yield* Effect.promise(() =>
+        const trunkAfter = yield* Effect.tryPromise(() =>
           runGit(root, [
             "--git-dir",
             `${paths.revisDir}/coordination.git`,
@@ -240,7 +240,7 @@ describe("Revis CLI acceptance", () => {
             `refs/heads/${TRUNK_BRANCH}`
           ])
         ).pipe(Effect.orDie);
-        const ancestry = yield* Effect.promise(() =>
+        const ancestry = yield* Effect.tryPromise(() =>
           runGit(root, [
             "--git-dir",
             `${paths.revisDir}/coordination.git`,

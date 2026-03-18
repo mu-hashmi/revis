@@ -28,6 +28,18 @@ import { ProjectPaths, projectPathsLayer } from "../../src/services/project-path
 import { assertSuccess, initGitRepo, runGit } from "../support/git";
 import { makeTempDirScoped, waitUntilEffect } from "../support/helpers";
 
+interface TestRuntimeFailure {
+  readonly _tag: "TestRuntimeFailure";
+  readonly message: string;
+}
+
+function toRuntimeFailure(error: unknown): TestRuntimeFailure {
+  return {
+    _tag: "TestRuntimeFailure",
+    message: error instanceof Error ? error.message : String(error)
+  };
+}
+
 describe("local WorkspaceProvider", () => {
   it.scopedLive("provisions a local clone on the expected branch with the workspace identity", () =>
     withLocalProvider("revis-local-provider-provision-", "printf 'hello\\n' && exit 0", (root) =>
@@ -55,12 +67,14 @@ describe("local WorkspaceProvider", () => {
         expect(provisioned.workspaceRoot).toBe(paths.workspaceRepoDir("agent-1"));
         expect(provisioned.localBranch).toBe(asBranchName("revis/operator-1/agent-1/work"));
 
-        const branch = yield* Effect.promise(() =>
-          runGit(provisioned.workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"])
-        ).pipe(Effect.orDie);
-        const email = yield* Effect.promise(() =>
-          runGit(provisioned.workspaceRoot, ["config", "user.email"])
-        ).pipe(Effect.orDie);
+        const branch = yield* Effect.tryPromise({
+          try: () => runGit(provisioned.workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"]),
+          catch: toRuntimeFailure
+        }).pipe(Effect.orDie);
+        const email = yield* Effect.tryPromise({
+          try: () => runGit(provisioned.workspaceRoot, ["config", "user.email"]),
+          catch: toRuntimeFailure
+        }).pipe(Effect.orDie);
 
         // Verify the user-visible branch shape and the git identity that later commits will carry.
         expect(branch.stdout.trim()).toBe("revis/operator-1/agent-1/work");
@@ -127,13 +141,16 @@ describe("local WorkspaceProvider", () => {
 
           // Destroying the workspace should remove the entire runtime tree after interrupting the
           // detached process.
-          const runtimeRemoved = yield* Effect.promise(async () => {
-            try {
-              await access(paths.workspaceRuntimeDir(snapshot.agentId));
-              return false;
-            } catch {
-              return true;
-            }
+          const runtimeRemoved = yield* Effect.tryPromise({
+            try: async () => {
+              try {
+                await access(paths.workspaceRuntimeDir(snapshot.agentId));
+                return false;
+              } catch {
+                return true;
+              }
+            },
+            catch: toRuntimeFailure
           }).pipe(Effect.orDie);
 
           expect(activity).toEqual(expect.arrayContaining(["line-one", "line-two"]));
@@ -152,24 +169,28 @@ function withLocalProvider(
   ) => Effect.Effect<void, unknown, HostGit | ProjectPaths | WorkspaceProvider | Scope.Scope>
 ) {
   return makeTempDirScoped(prefix).pipe(
-    Effect.flatMap((root) =>
-      Effect.gen(function* () {
-        yield* Effect.promise(async () => {
-          await initGitRepo(root);
-          await assertSuccess(
-            await runGit(root, ["commit", "--allow-empty", "-m", "Initial commit"])
-          );
+    Effect.flatMap((root) => {
+      const layer = makeLocalProviderLayer(root, execCommand);
+
+      return Effect.gen(function* () {
+        yield* Effect.tryPromise({
+          try: async () => {
+            await initGitRepo(root);
+            await assertSuccess(
+              await runGit(root, ["commit", "--allow-empty", "-m", "Initial commit"])
+            );
+          },
+          catch: toRuntimeFailure
         }).pipe(Effect.orDie);
 
-        const layer = makeLocalProviderLayer(root, execCommand);
         const hostGit = yield* HostGit;
         const remoteUrl = yield* hostGit.ensureCoordinationRemote(root);
 
         yield* hostGit.bootstrapCoordinationRemote(root, "revis-local", remoteUrl, "main");
 
         return yield* run(root).pipe(Effect.provide(layer));
-      }).pipe(Effect.provide(makeLocalProviderLayer(root, execCommand)))
-    )
+      }).pipe(Effect.provide(layer));
+    })
   );
 }
 

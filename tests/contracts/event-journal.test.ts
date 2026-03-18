@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -94,9 +95,15 @@ describe("EventJournal", () => {
         const ended = yield* journal.closeActiveSession;
 
         expect(second.id).toBe(first.id);
-        expect(ended?.id).toBe(first.id);
-        expect(ended?.endedAt).not.toBeNull();
-        expect(yield* journal.activeSession).toBeNull();
+        expect(Option.isSome(ended)).toBe(true);
+        if (Option.isNone(ended)) {
+          return yield* Effect.dieMessage(
+            "Expected closeActiveSession to return the active session"
+          );
+        }
+        expect(ended.value.id).toBe(first.id);
+        expect(ended.value.endedAt).not.toBeNull();
+        expect(Option.isNone(yield* journal.activeSession)).toBe(true);
       })
     )
   );
@@ -164,11 +171,24 @@ describe("EventJournal", () => {
         // metadata should retain the participant and mark it stopped.
         const initial = yield* journal.syncParticipants([first, second]);
         const updated = yield* journal.syncParticipants([second]);
+        const stored = yield* journal.loadSessionMeta(session.id);
 
-        expect(initial?.participantCount).toBe(2);
-        expect(updated?.participantCount).toBe(1);
-        expect(updated?.participants.find((participant) => participant.agentId === first.agentId)?.stoppedAt).not.toBeNull();
-        expect((yield* journal.loadSessionMeta(session.id))?.participantCount).toBe(1);
+        expect(Option.isSome(initial)).toBe(true);
+        expect(Option.isSome(updated)).toBe(true);
+        expect(Option.isSome(stored)).toBe(true);
+        if (Option.isNone(initial) || Option.isNone(updated) || Option.isNone(stored)) {
+          return yield* Effect.dieMessage(
+            "Expected participant sync to keep one active session"
+          );
+        }
+
+        expect(initial.value.participantCount).toBe(2);
+        expect(updated.value.participantCount).toBe(1);
+        expect(
+          updated.value.participants.find((participant) => participant.agentId === first.agentId)
+            ?.stoppedAt
+        ).not.toBeNull();
+        expect(stored.value.participantCount).toBe(1);
       })
     )
   );

@@ -1,6 +1,7 @@
 /** Fake `WorkspaceStore` service backed by the orchestration model state. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -17,7 +18,7 @@ export function buildWorkspaceStoreService(
     list: currentSnapshots(state),
     get: (agentId) =>
       Ref.get(state.snapshotsRef).pipe(
-        Effect.map((snapshots) => snapshots.get(agentId as AgentId) ?? null)
+        Effect.map((snapshots) => Option.fromNullable(snapshots.get(agentId as AgentId)))
       ),
     upsert: (snapshot) =>
       Effect.gen(function* () {
@@ -52,7 +53,7 @@ export function buildWorkspaceStoreService(
           agentId
         });
       }),
-    daemonState: Ref.get(state.daemonStateRef),
+    daemonState: Ref.get(state.daemonStateRef).pipe(Effect.map(Option.fromNullable)),
     setDaemonState: (daemonState) =>
       Effect.gen(function* () {
         yield* Ref.set(state.daemonStateRef, daemonState);

@@ -44,7 +44,7 @@ describe("HostGit", () => {
 
         // `determineRemoteName` is an operator-facing policy choice, so exercise it with the real
         // git config instead of a fake remote list.
-        yield* Effect.promise(() =>
+        yield* Effect.tryPromise(() =>
           runGit(root, ["remote", "add", "origin", remotePath])
         ).pipe(Effect.orDie);
 
@@ -61,7 +61,7 @@ describe("HostGit", () => {
 
         // Build a real bare remote and push trunk once so the branch existence checks go through
         // git's real remote-ref machinery.
-        yield* Effect.promise(async () => {
+        yield* Effect.tryPromise(async () => {
           await assertSuccess(await runGit(root, ["init", "--bare", remotePath]));
           await assertSuccess(await runGit(root, ["remote", "add", "origin", remotePath]));
           await gitCommit(root, "Initial commit");
@@ -83,7 +83,7 @@ describe("HostGit", () => {
 
         // Seed the remote with trunk first, then exercise the full clone/create-branch/set-identity
         // flow exactly the way the local provider does it during provisioning.
-        yield* Effect.promise(async () => {
+        yield* Effect.tryPromise(async () => {
           await assertSuccess(await runGit(root, ["init", "--bare", remotePath]));
           await assertSuccess(await runGit(root, ["remote", "add", "origin", remotePath]));
           await gitCommit(root, "Initial commit");
@@ -99,10 +99,10 @@ describe("HostGit", () => {
         );
         yield* hostGit.setGitIdentity(clonePath, "operator-1-agent-1", "operator-1+agent-1@revis.local");
 
-        const branch = yield* Effect.promise(() =>
+        const branch = yield* Effect.tryPromise(() =>
           runGit(clonePath, ["rev-parse", "--abbrev-ref", "HEAD"])
         ).pipe(Effect.orDie);
-        const email = yield* Effect.promise(() =>
+        const email = yield* Effect.tryPromise(() =>
           runGit(clonePath, ["config", "user.email"])
         ).pipe(Effect.orDie);
 
@@ -121,7 +121,7 @@ function withHostGit(
   return makeTempDirScoped(prefix).pipe(
     Effect.flatMap((root) =>
       Effect.gen(function* () {
-        yield* Effect.promise(() => initGitRepo(root)).pipe(Effect.orDie);
+        yield* Effect.tryPromise(() => initGitRepo(root)).pipe(Effect.orDie);
         return yield* run(root).pipe(Effect.provide(makeHostGitLayer()));
       })
     )

@@ -9,7 +9,10 @@ import React, {
   useState
 } from "react";
 
-import type { RuntimeEvent, SessionMeta, SessionSummary } from "../domain/models";
+import * as Either from "effect/Either";
+import * as Schema from "effect/Schema";
+
+import { RuntimeEventSchema, type RuntimeEvent, type SessionMeta, type SessionSummary } from "../domain/models";
 import {
   fetchCommitDetail,
   fetchSessionEvents,
@@ -572,7 +575,15 @@ function useDashboardData(): DashboardDataState {
 
   /** Append one streamed runtime event and refresh live session metadata around it. */
   const handleSseMessage = useEffectEvent((payload: string): void => {
-    const event = JSON.parse(payload) as RuntimeEvent;
+    const decodedEvent = Schema.decodeUnknownEither(Schema.parseJson(RuntimeEventSchema))(payload);
+    if (Either.isLeft(decodedEvent)) {
+      // EventSource callbacks run outside the dashboard's request/load flow, so parse failures
+      // must be surfaced into UI state explicitly instead of throwing out of band.
+      setLoadError(String(decodedEvent.left));
+      return;
+    }
+
+    const event = decodedEvent.right;
 
     startTransition(() => {
       setEvents((current) => [...current, event]);

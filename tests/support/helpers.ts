@@ -4,8 +4,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
+import * as TestClock from "effect/TestClock";
 
 /** Create one temporary directory under the system temp root. */
 export async function makeTempDir(prefix: string): Promise<string> {
@@ -17,12 +20,31 @@ export async function removeTree(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
 }
 
+interface TestRuntimeFailure {
+  readonly _tag: "TestRuntimeFailure";
+  readonly message: string;
+}
+
+/** Normalize raw promise failures into one small tagged shape for helper effects. */
+function toRuntimeFailure(error: unknown): TestRuntimeFailure {
+  return {
+    _tag: "TestRuntimeFailure",
+    message: error instanceof Error ? error.message : String(error)
+  };
+}
+
 /** Acquire a temporary directory inside an Effect scope. */
 export function makeTempDirScoped(prefix: string): Effect.Effect<string, never, Scope.Scope> {
   return Effect.acquireRelease(
-    Effect.promise(() => makeTempDir(prefix)).pipe(Effect.orDie),
+    Effect.tryPromise({
+      try: () => makeTempDir(prefix),
+      catch: toRuntimeFailure
+    }).pipe(Effect.orDie),
     (path) =>
-      Effect.promise(() => removeTree(path)).pipe(Effect.ignoreLogged, Effect.orDie)
+      Effect.tryPromise({
+        try: () => removeTree(path),
+        catch: toRuntimeFailure
+      }).pipe(Effect.ignoreLogged, Effect.orDie)
   );
 }
 
@@ -74,28 +96,38 @@ export function waitUntilEffect<A, B extends A, E, R>(
   predicate: (value: A) => B | null,
   options: WaitUntilOptions
 ): Effect.Effect<B, E, R> {
-  const deadline = Date.now() + options.timeoutMs;
   const intervalMs = options.intervalMs ?? 100;
 
-  const loop = (): Effect.Effect<B, E, R> =>
-    Effect.gen(function* () {
-      const value = yield* effect;
-      const match = predicate(value);
-      if (match) {
-        return match;
-      }
+  return Effect.gen(function* () {
+    const deadline = (yield* Clock.currentTimeMillis) + options.timeoutMs;
+    const testClock = yield* Effect.serviceOption(TestClock.TestClock);
 
-      if (Date.now() >= deadline) {
-        return yield* Effect.dieMessage(`Timed out after ${options.timeoutMs}ms`);
-      }
+    const loop = (): Effect.Effect<B, E, R> =>
+      Effect.gen(function* () {
+        // Run the effect first so the predicate always sees the freshest observable state.
+        const value = yield* effect;
+        const match = predicate(value);
+        if (match) {
+          return match;
+        }
 
-      // Use a real sleep here because these helpers back live-process tests as well as in-memory
-      // orchestration tests.
-      yield* Effect.promise(() => sleep(intervalMs)).pipe(Effect.orDie);
-      return yield* loop();
-    });
+        if ((yield* Clock.currentTimeMillis) >= deadline) {
+          return yield* Effect.dieMessage(`Timed out after ${options.timeoutMs}ms`);
+        }
 
-  return loop();
+        // Scoped Effect tests can advance virtual time; live acceptance helpers still need a real
+        // sleep branch so the same helper works in both environments.
+        if (Option.isSome(testClock)) {
+          yield* TestClock.adjust(intervalMs);
+        } else {
+          yield* Effect.sleep(intervalMs);
+        }
+
+        return yield* loop();
+      });
+
+    return yield* loop();
+  });
 }
 
 /** Sleep for a bounded amount of real time. */

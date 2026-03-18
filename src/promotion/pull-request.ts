@@ -1,7 +1,9 @@
 /** Pull-request promotion flow for GitHub-backed coordination remotes. */
 
 import type * as CommandExecutor from "@effect/platform/CommandExecutor";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { ValidationError, validationError } from "../domain/errors";
@@ -66,7 +68,10 @@ function ensureGithubCliReady(
   return Effect.gen(function* () {
     yield* runCommandWith(executor, ["gh", "--version"], { cwd: root });
 
-    if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
+    const ghToken = yield* Config.option(Config.redacted("GH_TOKEN")).pipe(Effect.orDie);
+    const githubToken = yield* Config.option(Config.redacted("GITHUB_TOKEN")).pipe(Effect.orDie);
+
+    if (Option.isSome(ghToken) || Option.isSome(githubToken)) {
       return;
     }
 

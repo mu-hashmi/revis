@@ -4,6 +4,7 @@ import type * as CommandExecutor from "@effect/platform/CommandExecutor";
 import type * as PlatformFileSystem from "@effect/platform/FileSystem";
 import type * as PlatformPath from "@effect/platform/Path";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   projectBootstrapLayer,
@@ -60,22 +61,34 @@ export function withProjectBootstrap<A, E, R extends ProjectBootstrapServices | 
   return run().pipe(Effect.provide(projectBootstrapLayer(root))) as Effect.Effect<A, E, CliPlatform>;
 }
 
-/** Fetch one JSON payload from the daemon and fail with a typed validation error. */
-export function fetchJson<A>(url: string): Effect.Effect<A, ValidationError> {
+/** Fetch and decode one JSON payload from the daemon. */
+export function fetchJson<A, I>(url: string, schema: Schema.Schema<A, I>): Effect.Effect<A, ValidationError> {
   return Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(url, { cache: "no-store" });
+    try: async (signal) => {
+      // Keep transport failures separate from schema failures so the decode step can stay in the
+      // typed Effect error channel below.
+      const response = await fetch(url, { cache: "no-store", signal });
       if (!response.ok) {
         throw new Error(await response.text());
       }
 
-      return (await response.json()) as A;
+      return response.json();
     },
     catch: (error) =>
       ValidationError.make({
         message: error instanceof Error ? error.message : String(error)
       })
-  });
+  }).pipe(
+    Effect.flatMap((payload) =>
+      Schema.decodeUnknown(schema)(payload).pipe(
+        Effect.mapError((error) =>
+          ValidationError.make({
+            message: String(error)
+          })
+        )
+      )
+    )
+  );
 }
 
 /** Print one formatted domain error and set the process exit code. */

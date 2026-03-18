@@ -4,16 +4,17 @@ import { FileSystem } from "@effect/platform";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
-import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import { ProjectPaths, type ProjectPathsApi } from "./project-paths";
 import {
   appendJsonLine,
   ensureDirectory,
   readJsonFile,
-  readJsonFileOrNull,
+  readJsonFileIfExists,
   readJsonLines,
   writeJsonFile
 } from "../platform/storage";
@@ -25,7 +26,6 @@ import {
   SessionParticipant,
   SessionSummary,
   Timestamp,
-  type AgentId,
   type RuntimeEvent,
   type WorkspaceSnapshot
 } from "../domain/models";
@@ -39,18 +39,25 @@ export interface EventJournalApi {
   }) => Effect.Effect<SessionMeta, StorageError>;
   readonly syncParticipants: (
     snapshots: ReadonlyArray<WorkspaceSnapshot>
-  ) => Effect.Effect<SessionMeta | null, StorageError>;
-  readonly activeSession: Effect.Effect<SessionMeta | null, StorageError>;
-  readonly closeActiveSession: Effect.Effect<SessionMeta | null, StorageError>;
+  ) => Effect.Effect<Option.Option<SessionMeta>, StorageError>;
+  readonly activeSession: Effect.Effect<Option.Option<SessionMeta>, StorageError>;
+  readonly closeActiveSession: Effect.Effect<Option.Option<SessionMeta>, StorageError>;
   readonly append: (event: RuntimeEvent) => Effect.Effect<void, StorageError>;
   readonly loadEvents: (limit?: number) => Effect.Effect<ReadonlyArray<RuntimeEvent>, StorageError>;
   readonly stream: Stream.Stream<RuntimeEvent>;
   readonly listSessions: Effect.Effect<ReadonlyArray<SessionSummary>, StorageError>;
-  readonly loadSessionMeta: (sessionId: string) => Effect.Effect<SessionMeta | null, StorageError>;
+  readonly loadSessionMeta: (
+    sessionId: string
+  ) => Effect.Effect<Option.Option<SessionMeta>, StorageError>;
   readonly loadSessionEvents: (
     sessionId: string,
     limit?: number
   ) => Effect.Effect<ReadonlyArray<RuntimeEvent>, StorageError>;
+}
+
+interface EventJournalState {
+  readonly currentSession: Option.Option<SessionMeta>;
+  readonly summaries: ReadonlyArray<SessionSummary>;
 }
 
 /** Append-only event log plus archive/session projections for daemon and UI consumers. */
@@ -70,13 +77,14 @@ export const eventJournalLayer = Layer.scoped(
     yield* ensureDirectory(fs, paths.archiveDir);
     yield* ensureDirectory(fs, paths.sessionsDir);
 
-    // Recover persisted archive metadata into in-memory refs for fast access.
+    // Keep the active session pointer and summary index in one synchronized state cell so archive
+    // writes and in-memory views cannot drift apart under concurrent updates.
     const summaries = yield* loadSessionSummaries(fs, paths);
     const currentSession = yield* recoverCurrentSession(fs, paths, summaries);
-    const summariesRef = yield* Ref.make(
-      [...summaries].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
-    );
-    const currentSessionRef = yield* Ref.make<SessionMeta | null>(currentSession);
+    const stateRef = yield* SynchronizedRef.make<EventJournalState>({
+      currentSession: Option.fromNullable(currentSession),
+      summaries: [...summaries].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+    });
     const pubsub = yield* Effect.acquireRelease(
       PubSub.unbounded<RuntimeEvent>(),
       (events) => PubSub.shutdown(events)
@@ -88,172 +96,170 @@ export const eventJournalLayer = Layer.scoped(
       trunkBase: string;
       operatorSlug: string;
     }) =>
-      Effect.gen(function* () {
-        const existing = yield* Ref.get(currentSessionRef);
-        if (existing) {
-          return existing;
-        }
+      SynchronizedRef.modifyEffect(stateRef, (state) =>
+        Option.match(state.currentSession, {
+          onSome: (existing) => Effect.succeed([existing, state] as const),
+          onNone: () =>
+            Effect.gen(function* () {
+              const session = SessionMeta.make({
+                id: SessionId.make(`sess-${crypto.randomUUID()}`),
+                startedAt: isoNow() as Timestamp,
+                endedAt: null,
+                coordinationRemote: options.coordinationRemote,
+                trunkBase: options.trunkBase,
+                operatorSlug: options.operatorSlug as SessionMeta["operatorSlug"],
+                participants: [],
+                participantCount: 0
+              });
 
-        const session = SessionMeta.make({
-          id: SessionId.make(`sess-${crypto.randomUUID()}`),
-          startedAt: isoNow() as Timestamp,
-          endedAt: null,
-          coordinationRemote: options.coordinationRemote,
-          trunkBase: options.trunkBase,
-          operatorSlug: options.operatorSlug as SessionMeta["operatorSlug"],
-          participants: [],
-          participantCount: 0
-        });
+              yield* ensureDirectory(fs, paths.sessionDir(session.id));
+              yield* writeJsonFile(fs, paths.sessionMetaFile(session.id), SessionMeta, session);
+              yield* fs.writeFileString(paths.liveJournalFile, "").pipe(
+                Effect.mapError((error) =>
+                  StorageError.make({
+                    path: paths.liveJournalFile,
+                    message: error.message
+                  })
+                )
+              );
 
-        yield* ensureDirectory(fs, paths.sessionDir(session.id));
-        yield* writeJsonFile(fs, paths.sessionMetaFile(session.id), SessionMeta, session);
-        yield* fs.writeFileString(paths.liveJournalFile, "").pipe(
-          Effect.mapError((error) =>
-            StorageError.make({
-              path: paths.liveJournalFile,
-              message: error.message
+              return [
+                session,
+                {
+                  currentSession: Option.some(session),
+                  summaries: upsertSessionSummary(state.summaries, session)
+                }
+              ] as const;
             })
-          )
-        );
-        yield* Ref.set(currentSessionRef, session);
-        yield* Ref.update(summariesRef, (current) =>
-          [
-            SessionSummary.make({
-              id: session.id,
-              startedAt: session.startedAt,
-              endedAt: session.endedAt,
-              coordinationRemote: session.coordinationRemote,
-              trunkBase: session.trunkBase,
-              operatorSlug: session.operatorSlug,
-              participantCount: session.participantCount
-            }),
-            ...current
-          ].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
-        );
-
-        return session;
-      });
+        })
+      );
 
     /** Refresh the active session participant list from the current workspace snapshots. */
     const syncParticipants = (snapshots: ReadonlyArray<WorkspaceSnapshot>) =>
-      Effect.gen(function* () {
-        const current = yield* Ref.get(currentSessionRef);
-        if (!current) {
-          return null;
-        }
+      SynchronizedRef.modifyEffect(stateRef, (state) =>
+        Option.match(state.currentSession, {
+          onNone: () => Effect.succeed([Option.none<SessionMeta>(), state] as const),
+          onSome: (current) =>
+            Effect.gen(function* () {
+              // Rebuild the participant model from the latest workspace snapshots.
+              const now = isoNow() as Timestamp;
+              const activeAgentIds = new Set(snapshots.map((snapshot) => snapshot.agentId));
+              const nextParticipants = new Map(
+                current.participants.map((participant) => [participant.agentId, participant])
+              );
 
-        const now = isoNow() as Timestamp;
-        const activeAgentIds = new Set(snapshots.map((snapshot) => snapshot.agentId));
-        const nextParticipants = new Map(
-          current.participants.map((participant) => [participant.agentId, participant])
-        );
+              for (const snapshot of snapshots) {
+                const existing = nextParticipants.get(snapshot.agentId);
+                if (existing) {
+                  nextParticipants.set(
+                    snapshot.agentId,
+                    SessionParticipant.make({
+                      ...existing,
+                      coordinationBranch: snapshot.spec.coordinationBranch,
+                      stoppedAt: null
+                    })
+                  );
+                  continue;
+                }
 
-        for (const snapshot of snapshots) {
-          const existing = nextParticipants.get(snapshot.agentId);
-          if (existing) {
-            nextParticipants.set(
-              snapshot.agentId,
-              SessionParticipant.make({
-                ...existing,
-                coordinationBranch: snapshot.spec.coordinationBranch,
-                stoppedAt: null
-              })
-            );
-            continue;
-          }
+                nextParticipants.set(
+                  snapshot.agentId,
+                  SessionParticipant.make({
+                    agentId: snapshot.agentId,
+                    coordinationBranch: snapshot.spec.coordinationBranch,
+                    startedAt: now,
+                    stoppedAt: null
+                  })
+                );
+              }
 
-          nextParticipants.set(
-            snapshot.agentId,
-            SessionParticipant.make({
-              agentId: snapshot.agentId,
-              coordinationBranch: snapshot.spec.coordinationBranch,
-              startedAt: now,
-              stoppedAt: null
+              for (const participant of current.participants) {
+                if (activeAgentIds.has(participant.agentId) || participant.stoppedAt !== null) {
+                  continue;
+                }
+
+                nextParticipants.set(
+                  participant.agentId,
+                  SessionParticipant.make({
+                    ...participant,
+                    stoppedAt: now
+                  })
+                );
+              }
+
+              const next = SessionMeta.make({
+                ...current,
+                participants: [...nextParticipants.values()],
+                participantCount: [...nextParticipants.values()].filter(
+                  (participant) => participant.stoppedAt === null
+                ).length
+              });
+
+              // Persist the archive first, then publish the matching in-memory state.
+              yield* writeJsonFile(fs, paths.sessionMetaFile(next.id), SessionMeta, next);
+
+              return [
+                Option.some(next),
+                {
+                  currentSession: Option.some(next),
+                  summaries: upsertSessionSummary(state.summaries, next)
+                }
+              ] as const;
             })
-          );
-        }
-
-        for (const participant of current.participants) {
-          if (activeAgentIds.has(participant.agentId) || participant.stoppedAt !== null) {
-            continue;
-          }
-
-          nextParticipants.set(
-            participant.agentId,
-            SessionParticipant.make({
-              ...participant,
-              stoppedAt: now
-            })
-          );
-        }
-
-        const next = SessionMeta.make({
-          ...current,
-          participants: [...nextParticipants.values()],
-          participantCount: [...nextParticipants.values()].filter(
-            (participant) => participant.stoppedAt === null
-          ).length
-        });
-
-        yield* writeJsonFile(fs, paths.sessionMetaFile(next.id), SessionMeta, next);
-        yield* Ref.set(currentSessionRef, next);
-        yield* Ref.update(summariesRef, (currentSummaries) =>
-          currentSummaries.map((summary) =>
-            summary.id === next.id
-              ? SessionSummary.make({
-                  ...summary,
-                  endedAt: next.endedAt,
-                  participantCount: next.participantCount
-                })
-              : summary
-          )
-        );
-
-        return next;
-      });
-
-    /** Mark the active session as ended and persist the final session summary view. */
-    const closeActiveSession = Effect.gen(function* () {
-      const current = yield* Ref.get(currentSessionRef);
-      if (!current) {
-        return null;
-      }
-
-      if (current.endedAt !== null) {
-        return current;
-      }
-
-      const ended = SessionMeta.make({
-        ...current,
-        endedAt: isoNow() as Timestamp
-      });
-
-      yield* writeJsonFile(fs, paths.sessionMetaFile(ended.id), SessionMeta, ended);
-      yield* Ref.set(currentSessionRef, null);
-      yield* Ref.update(summariesRef, (currentSummaries) =>
-        currentSummaries.map((summary) =>
-          summary.id === ended.id
-            ? SessionSummary.make({
-                ...summary,
-                endedAt: ended.endedAt,
-                participantCount: ended.participantCount
-              })
-            : summary
-        )
+        })
       );
 
-      return ended;
-    });
+    /** Mark the active session as ended and persist the final session summary view. */
+    const closeActiveSession = SynchronizedRef.modifyEffect(stateRef, (state) =>
+      Option.match(state.currentSession, {
+        onNone: () => Effect.succeed([Option.none<SessionMeta>(), state] as const),
+        onSome: (current) => {
+          if (current.endedAt !== null) {
+            return Effect.succeed([Option.some(current), state] as const);
+          }
+
+          return Effect.gen(function* () {
+            const ended = SessionMeta.make({
+              ...current,
+              endedAt: isoNow() as Timestamp
+            });
+
+            // Write the final archive snapshot before clearing the live-session pointer.
+            yield* writeJsonFile(fs, paths.sessionMetaFile(ended.id), SessionMeta, ended);
+
+            return [
+              Option.some(ended),
+              {
+                currentSession: Option.none<SessionMeta>(),
+                summaries: upsertSessionSummary(state.summaries, ended)
+              }
+            ] as const;
+          });
+        }
+      })
+    );
 
     /** Append one runtime event to the live log, active archive, and in-process stream. */
     const append = (event: RuntimeEvent) =>
       Effect.gen(function* () {
-        yield* appendJsonLine(fs, paths.liveJournalFile, RuntimeEventSchema, event);
+        // Serialize archive writes against session transitions so an event cannot race with close
+        // or participant updates and land in inconsistent on-disk state.
+        yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+          Effect.gen(function* () {
+            yield* appendJsonLine(fs, paths.liveJournalFile, RuntimeEventSchema, event);
 
-        const current = yield* Ref.get(currentSessionRef);
-        if (current) {
-          yield* appendJsonLine(fs, paths.sessionEventsFile(current.id), RuntimeEventSchema, event);
-        }
+            if (Option.isSome(state.currentSession)) {
+              yield* appendJsonLine(
+                fs,
+                paths.sessionEventsFile(state.currentSession.value.id),
+                RuntimeEventSchema,
+                event
+              );
+            }
+
+            return [undefined, state] as const;
+          })
+        );
 
         yield* PubSub.publish(pubsub, event);
       });
@@ -262,13 +268,13 @@ export const eventJournalLayer = Layer.scoped(
     return EventJournal.of({
       ensureActiveSession,
       syncParticipants,
-      activeSession: Ref.get(currentSessionRef),
+      activeSession: SynchronizedRef.get(stateRef).pipe(Effect.map((state) => state.currentSession)),
       closeActiveSession,
       append,
       loadEvents: (limit) => readJsonLines(fs, paths.liveJournalFile, RuntimeEventSchema, limit),
       stream: Stream.fromPubSub(pubsub),
-      listSessions: Ref.get(summariesRef),
-      loadSessionMeta: (sessionId) => readJsonFileOrNull(fs, paths.sessionMetaFile(sessionId), SessionMeta),
+      listSessions: SynchronizedRef.get(stateRef).pipe(Effect.map((state) => state.summaries)),
+      loadSessionMeta: (sessionId) => readJsonFileIfExists(fs, paths.sessionMetaFile(sessionId), SessionMeta),
       loadSessionEvents: (sessionId, limit) =>
         readJsonLines(fs, paths.sessionEventsFile(sessionId), RuntimeEventSchema, limit)
     });
@@ -294,25 +300,18 @@ function loadSessionSummaries(
       Effect.forEach(
         entries.sort(),
         (entry) =>
-          readJsonFileOrNull(fs, paths.sessionMetaFile(entry), SessionMeta).pipe(
+          readJsonFileIfExists(fs, paths.sessionMetaFile(entry), SessionMeta).pipe(
             Effect.map((meta) =>
-              meta
-                ? SessionSummary.make({
-                    id: meta.id,
-                    startedAt: meta.startedAt,
-                    endedAt: meta.endedAt,
-                    coordinationRemote: meta.coordinationRemote,
-                    trunkBase: meta.trunkBase,
-                    operatorSlug: meta.operatorSlug,
-                    participantCount: meta.participantCount
-                  })
-                : null
+              Option.match(meta, {
+                onNone: () => Option.none<SessionSummary>(),
+                onSome: (session) => Option.some(sessionSummary(session))
+              })
             )
           ),
         { concurrency: "unbounded" }
       )
     ),
-    Effect.map((entries) => entries.filter((entry): entry is SessionSummary => entry !== null))
+    Effect.map((entries) => entries.filter(Option.isSome).map((entry) => entry.value))
   );
 }
 
@@ -335,4 +334,27 @@ function recoverCurrentSession(
     // how to merge overlapping archives.
     return yield* readJsonFile(fs, paths.sessionMetaFile(liveSummaries[0]!.id), SessionMeta);
   });
+}
+
+/** Project one session metadata record into the dashboard/session index summary shape. */
+function sessionSummary(session: SessionMeta): SessionSummary {
+  return SessionSummary.make({
+    id: session.id,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    coordinationRemote: session.coordinationRemote,
+    trunkBase: session.trunkBase,
+    operatorSlug: session.operatorSlug,
+    participantCount: session.participantCount
+  });
+}
+
+/** Insert or replace one session summary while keeping newest sessions first. */
+function upsertSessionSummary(
+  summaries: ReadonlyArray<SessionSummary>,
+  session: SessionMeta
+): ReadonlyArray<SessionSummary> {
+  return [sessionSummary(session), ...summaries.filter((summary) => summary.id !== session.id)].sort((left, right) =>
+    right.startedAt.localeCompare(left.startedAt)
+  );
 }

@@ -1,10 +1,10 @@
 /** Shared state model backing the in-memory orchestration harness. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 
-import { ProviderError } from "../../../src/domain/errors";
 import {
   type AgentId,
   type BranchName,
@@ -122,7 +122,7 @@ export function currentWorkspaceRuntime(
   agentId: AgentId | string
 ) {
   return Ref.get(state.workspaceRef).pipe(
-    Effect.map((workspaces) => workspaces.get(agentId as AgentId) ?? null)
+    Effect.map((workspaces) => Option.fromNullable(workspaces.get(agentId as AgentId)))
   );
 }
 
@@ -150,18 +150,15 @@ export function setWorkspaceState(
   agentId: AgentId | string,
   update: (workspace: WorkspaceRuntimeState) => WorkspaceRuntimeState
 ) {
-  return Ref.update(state.workspaceRef, (current) => {
-    const workspace = current.get(agentId as AgentId);
-
-    if (!workspace) {
-      throw new Error(`Unknown workspace ${agentId}`);
-    }
-
-    const next = new Map(current);
-    next.set(agentId as AgentId, update(workspace));
-
-    return next;
-  }).pipe(Effect.orDie);
+  return requireWorkspace(state, agentId).pipe(
+    Effect.flatMap((workspace) =>
+      Ref.update(state.workspaceRef, (current) => {
+        const next = new Map(current);
+        next.set(agentId as AgentId, update(workspace));
+        return next;
+      })
+    )
+  );
 }
 
 /** Require one workspace runtime record and fail loudly when the test forgot to seed it. */
@@ -176,11 +173,7 @@ export function requireWorkspace(
         return Effect.succeed(workspace);
       }
 
-      return ProviderError.make({
-        provider: "local",
-        action: "workspace lookup",
-        message: `Unknown workspace ${agentId}`
-      });
+      return Effect.dieMessage(`Unknown workspace ${agentId}`);
     })
   );
 }

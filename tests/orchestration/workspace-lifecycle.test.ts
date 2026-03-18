@@ -3,8 +3,9 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FastCheck from "effect/FastCheck";
+import * as Option from "effect/Option";
 
-import { WorkspaceStopped } from "../../src/domain/models";
+import { WorkspaceStopped, asAgentId } from "../../src/domain/models";
 import { EventJournal } from "../../src/services/event-journal";
 import { WorkspaceStore } from "../../src/services/workspace-store";
 import {
@@ -24,7 +25,7 @@ describe("workspace lifecycle workflows", () => {
           // Leave a gap at agent-1 so the workflow has to allocate around an existing workspace.
           yield* harness.controls.seedWorkspace(
             makeRestartPendingSnapshot(harness.paths.root, {
-              agentId: "agent-2" as never
+              agentId: asAgentId("agent-2")
             })
           );
 
@@ -59,9 +60,10 @@ describe("workspace lifecycle workflows", () => {
           const stopped = yield* stopWorkspace(created.agentId);
           const store = yield* WorkspaceStore;
           const events = yield* EventJournal.pipe(Effect.flatMap((journal) => journal.loadEvents()));
+          const storedSnapshot = yield* store.get(created.agentId);
 
           expect(stopped?.agentId).toBe(created.agentId);
-          expect(yield* store.get(created.agentId)).toBeNull();
+          expect(Option.isNone(storedSnapshot)).toBe(true);
           expect(events.at(-1)).toBeInstanceOf(WorkspaceStopped);
         }).pipe(Effect.provide(harness.layer))
       )
@@ -85,7 +87,7 @@ describe("workspace lifecycle workflows", () => {
             for (const index of used) {
               yield* harness.controls.seedWorkspace(
                 makeRestartPendingSnapshot(harness.paths.root, {
-                  agentId: `agent-${index}` as never
+                  agentId: asAgentId(`agent-${index}`)
                 })
               );
             }

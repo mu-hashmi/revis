@@ -2,6 +2,7 @@
 
 import { Args, Command, Options } from "@effect/cli";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { DaemonControl } from "../../daemon/control";
 import { ValidationError } from "../../domain/errors";
@@ -39,12 +40,12 @@ export function makeStopCommand(io: CliWriters) {
 
           const store = yield* WorkspaceStore;
           const snapshot = yield* store.get(id);
-          if (!snapshot) {
+          if (Option.isNone(snapshot)) {
             return yield* ValidationError.make({ message: `Unknown workspace ${id}` });
           }
 
           yield* daemon.stopWorkspaces([id]);
-          yield* writeLine(writeOut, `Stopped ${snapshot.agentId}`);
+          yield* writeLine(writeOut, `Stopped ${snapshot.value.agentId}`);
         })
       ),
       writeErr

@@ -1,6 +1,7 @@
 /** Operator-facing status snapshots derived from Effect services. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { StatusSnapshot, StatusWorkspace } from "../domain/models";
 import { ProjectConfig } from "../services/project-config";
@@ -56,8 +57,8 @@ export function loadStatusSnapshot(options: LoadStatusOptions = {}) {
           StatusWorkspace.make({
             snapshot,
             aheadCount: 0,
-              lastCommitSubject: ""
-            })
+            lastCommitSubject: ""
+          })
         );
 
     // Assemble the final CLI/dashboard-facing snapshot from the composed services.
@@ -66,7 +67,10 @@ export function loadStatusSnapshot(options: LoadStatusOptions = {}) {
       config,
       operatorSlug,
       syncBranch,
-      daemon: yield* store.daemonState,
+      daemon: Option.match(yield* store.daemonState, {
+        onNone: () => null,
+        onSome: (daemonState) => daemonState
+      }),
       workspaces,
       events: yield* eventJournal.loadEvents(eventLimit)
     });

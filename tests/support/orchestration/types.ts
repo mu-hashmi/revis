@@ -2,6 +2,7 @@
 
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import type {
   AgentId,
@@ -63,12 +64,12 @@ export interface OrchestrationControls {
   readonly currentSnapshots: Effect.Effect<ReadonlyArray<WorkspaceSnapshot>>;
   readonly currentWorkspaceRuntime: (
     agentId: AgentId | string
-  ) => Effect.Effect<WorkspaceRuntimeState | null>;
+  ) => Effect.Effect<Option.Option<WorkspaceRuntimeState>>;
   readonly exitSession: (
     agentId: AgentId | string,
     exitCode?: number
   ) => Effect.Effect<void>;
-  readonly latestSessionId: (agentId: AgentId | string) => Effect.Effect<string | null>;
+  readonly latestSessionId: (agentId: AgentId | string) => Effect.Effect<Option.Option<string>>;
   readonly seedWorkspace: (snapshot: WorkspaceSnapshot) => Effect.Effect<void>;
   readonly setActivityLines: (
     agentId: AgentId | string,

@@ -4,6 +4,7 @@ import { FileSystem } from "@effect/platform";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -11,7 +12,7 @@ import * as Stream from "effect/Stream";
 import { ProjectPaths, type ProjectPathsApi } from "./project-paths";
 import {
   ensureDirectory,
-  readJsonFileOrNull,
+  readJsonFileIfExists,
   removeFile,
   writeJsonFile
 } from "../platform/storage";
@@ -31,12 +32,12 @@ export interface WorkspaceStoreApi {
   readonly list: Effect.Effect<ReadonlyArray<WorkspaceSnapshot>, StorageError>;
   readonly get: (
     agentId: AgentId | string
-  ) => Effect.Effect<WorkspaceSnapshot | null, StorageError>;
+  ) => Effect.Effect<Option.Option<WorkspaceSnapshot>, StorageError>;
   readonly upsert: (
     snapshot: WorkspaceSnapshot
   ) => Effect.Effect<WorkspaceSnapshot, StorageError>;
   readonly remove: (agentId: AgentId | string) => Effect.Effect<void, StorageError>;
-  readonly daemonState: Effect.Effect<DaemonState | null, StorageError>;
+  readonly daemonState: Effect.Effect<Option.Option<DaemonState>, StorageError>;
   readonly setDaemonState: (state: DaemonState) => Effect.Effect<DaemonState, StorageError>;
   readonly clearDaemonState: Effect.Effect<void, StorageError>;
   readonly changes: Stream.Stream<WorkspaceStoreChange>;
@@ -60,7 +61,7 @@ export const workspaceStoreLayer = Layer.scoped(
 
     // Recover persisted daemon and workspace state into in-memory refs.
     const snapshots = yield* loadWorkspaceSnapshots(fs, paths);
-    const daemonState = yield* readJsonFileOrNull(fs, paths.daemonStateFile, DaemonState);
+    const daemonState = yield* readJsonFileIfExists(fs, paths.daemonStateFile, DaemonState);
     const snapshotsRef = yield* Ref.make(
       new Map(snapshots.map((snapshot) => [snapshot.agentId, snapshot]))
     );
@@ -81,7 +82,7 @@ export const workspaceStoreLayer = Layer.scoped(
 
     const get = (agentId: AgentId | string) =>
       Ref.get(snapshotsRef).pipe(
-        Effect.map((current) => current.get(agentId as AgentId) ?? null)
+        Effect.map((current) => Option.fromNullable(current.get(agentId as AgentId)))
       );
 
     const upsert = (snapshot: WorkspaceSnapshot) =>
@@ -110,14 +111,16 @@ export const workspaceStoreLayer = Layer.scoped(
     const setDaemonState = (state: DaemonState) =>
       Effect.gen(function* () {
         yield* writeJsonFile(fs, paths.daemonStateFile, DaemonState, state);
-        yield* Ref.set(daemonRef, state);
+        yield* Ref.set(daemonRef, Option.some(state));
         yield* PubSub.publish(pubsub, { _tag: "DaemonUpdated", state });
         return state;
       });
 
     const clearDaemonState = Effect.gen(function* () {
       yield* removeFile(fs, paths.daemonStateFile);
-      yield* Ref.set(daemonRef, null);
+      // Model daemon absence with `Option.none()` end-to-end instead of reintroducing `null` into
+      // the service state itself.
+      yield* Ref.set(daemonRef, Option.none());
       yield* PubSub.publish(pubsub, { _tag: "DaemonUpdated", state: null });
     });
 
@@ -153,15 +156,15 @@ function loadWorkspaceSnapshots(
       Effect.forEach(
         entries.filter((entry) => entry.endsWith(".json")).sort(),
         (entry) =>
-          readJsonFileOrNull(
+          readJsonFileIfExists(
             fs,
             `${paths.workspaceStateDir}/${entry}`,
             WorkspaceSnapshot
-          ).pipe(Effect.map((snapshot) => snapshot)),
+          ),
         { concurrency: "unbounded" }
       )
     ),
-    Effect.map((entries) => entries.filter((entry): entry is WorkspaceSnapshot => entry !== null))
+    Effect.map((entries) => entries.filter(Option.isSome).map((entry) => entry.value))
   );
 }
 

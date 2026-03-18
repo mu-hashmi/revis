@@ -3,7 +3,15 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
-import type { ProviderError } from "../domain/errors";
+import type {
+  WorkspaceActivityError,
+  WorkspaceCommandError,
+  WorkspaceDestroyError,
+  WorkspaceInspectError,
+  WorkspaceInterruptError,
+  WorkspaceProvisionError,
+  WorkspaceStartError
+} from "../domain/errors";
 import type {
   AgentId,
   BranchName,
@@ -25,6 +33,7 @@ export interface WorkspaceSessionStatus {
   readonly exitCode?: number;
 }
 
+/** Inputs needed to provision a fresh workspace checkout for one agent. */
 export interface ProvisionWorkspaceParams {
   readonly root: string;
   readonly remoteName: string;
@@ -36,6 +45,7 @@ export interface ProvisionWorkspaceParams {
   readonly execCommand: string;
 }
 
+/** Provider-owned workspace metadata returned after a successful provision step. */
 export interface ProvisionedWorkspace {
   readonly workspaceRoot: string;
   readonly localBranch: BranchName;
@@ -45,31 +55,32 @@ export interface ProvisionedWorkspace {
   readonly sandboxId?: string;
 }
 
+/** Runtime boundary implemented by each sandbox provider. */
 export interface WorkspaceProviderApi {
   readonly kind: SandboxProvider;
   readonly provision: (
     params: ProvisionWorkspaceParams
-  ) => Effect.Effect<ProvisionedWorkspace, HostGitError | ProviderError>;
+  ) => Effect.Effect<ProvisionedWorkspace, HostGitError | WorkspaceProvisionError>;
   readonly startIteration: (
     snapshot: WorkspaceSnapshot
-  ) => Effect.Effect<WorkspaceSessionId, ProviderError>;
+  ) => Effect.Effect<WorkspaceSessionId, WorkspaceStartError>;
   readonly inspectSession: (
     snapshot: WorkspaceSnapshot
-  ) => Effect.Effect<WorkspaceSessionStatus, ProviderError>;
+  ) => Effect.Effect<WorkspaceSessionStatus, WorkspaceInspectError>;
   readonly captureActivity: (
     snapshot: WorkspaceSnapshot
-  ) => Effect.Effect<ReadonlyArray<string>, ProviderError>;
+  ) => Effect.Effect<ReadonlyArray<string>, WorkspaceActivityError>;
   readonly runInWorkspace: (
     snapshot: WorkspaceSnapshot,
     argv: ReadonlyArray<string>,
     options?: RunCommandOptions
-  ) => Effect.Effect<CompletedCommand, CommandFailure | ProviderError>;
+  ) => Effect.Effect<CompletedCommand, CommandFailure | WorkspaceCommandError>;
   readonly interruptIteration: (
     snapshot: WorkspaceSnapshot
-  ) => Effect.Effect<void, ProviderError>;
+  ) => Effect.Effect<void, WorkspaceInterruptError>;
   readonly destroyWorkspace: (
     snapshot: WorkspaceSnapshot
-  ) => Effect.Effect<void, ProviderError>;
+  ) => Effect.Effect<void, WorkspaceDestroyError>;
 }
 
 /** Abstract workspace runtime boundary shared by local and Daytona providers. */

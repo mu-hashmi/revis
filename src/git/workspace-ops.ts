@@ -3,9 +3,9 @@
 import * as Effect from "effect/Effect";
 
 import {
-  ProviderError,
   RebaseConflictError,
-  ValidationError
+  ValidationError,
+  WorkspaceCommandError
 } from "../domain/errors";
 import { asRevision, type Revision, type WorkspaceSnapshot } from "../domain/models";
 import type { CommandFailure } from "../platform/process";
@@ -13,9 +13,9 @@ import type { WorkspaceProviderApi } from "../providers/contract";
 
 export type WorkspaceGitError =
   | CommandFailure
-  | ProviderError
   | RebaseConflictError
-  | ValidationError;
+  | ValidationError
+  | WorkspaceCommandError;
 
 /** Return the current checked-out branch for one workspace. */
 export function workspaceCurrentBranch(
@@ -104,7 +104,7 @@ export function fetchWorkspaceCoordinationRefs(
   snapshot: WorkspaceSnapshot,
   remoteName: string,
   syncBranch: string
-): Effect.Effect<void, CommandFailure | ProviderError> {
+): Effect.Effect<void, CommandFailure | WorkspaceCommandError> {
   return provider
     .runInWorkspace(snapshot, [
       "git",
@@ -124,7 +124,7 @@ export function pushWorkspaceHead(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot,
   remoteName: string
-): Effect.Effect<Revision, CommandFailure | ProviderError | ValidationError> {
+): Effect.Effect<Revision, CommandFailure | WorkspaceCommandError | ValidationError> {
   return provider
     .runInWorkspace(snapshot, [
       "git",
@@ -148,7 +148,10 @@ export function rebaseWorkspaceOntoSyncTarget(
   remoteName: string,
   syncBranch: string,
   targetSha: Revision
-): Effect.Effect<Revision, CommandFailure | ProviderError | RebaseConflictError | ValidationError> {
+): Effect.Effect<
+  Revision,
+  CommandFailure | RebaseConflictError | ValidationError | WorkspaceCommandError
+> {
   return Effect.gen(function* () {
     const result = yield* provider.runInWorkspace(
       snapshot,
@@ -184,7 +187,7 @@ export function workspaceCommitCountSinceRef(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot,
   baseRef: string
-): Effect.Effect<number, CommandFailure | ProviderError | ValidationError> {
+): Effect.Effect<number, CommandFailure | ValidationError | WorkspaceCommandError> {
   return provider
     .runInWorkspace(snapshot, ["git", "rev-list", "--count", `${baseRef}..HEAD`], {
       check: false

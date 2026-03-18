@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
 import { makeWorkspaceSupervisors } from "../../src/daemon/workspace-supervisor";
@@ -9,6 +10,8 @@ import {
   AwaitingRebaseState,
   RebaseConflictState,
   RunningState,
+  asAgentId,
+  asRevision,
   type WorkspaceSnapshot
 } from "../../src/domain/models";
 import { EventJournal } from "../../src/services/event-journal";
@@ -57,7 +60,14 @@ describe("workspace supervisors", () => {
           });
 
           const updated = yield* waitUntilEffect(
-            store.get(running.agentId),
+            store.get(running.agentId).pipe(
+              Effect.map((snapshot) =>
+                Option.match(snapshot, {
+                  onNone: () => null,
+                  onSome: (current) => current
+                })
+              )
+            ),
             (snapshot) =>
               snapshot?.state._tag === "Running" && snapshot.state.iteration === 2
                 ? snapshot
@@ -98,7 +108,7 @@ describe("workspace supervisors", () => {
           yield* harness.controls.setRemoteRef(
             "revis-local",
             harness.syncBranch,
-            "dddddddddddddddddddddddddddddddddddddddd" as never
+            asRevision("dddddddddddddddddddddddddddddddddddddddd")
           );
 
           const supervisors = yield* makeWorkspaceSupervisors({
@@ -114,11 +124,18 @@ describe("workspace supervisors", () => {
 
           yield* Queue.offer(handle.queue, {
             reason: "manual",
-            syncTargetSha: "dddddddddddddddddddddddddddddddddddddddd" as never
+            syncTargetSha: asRevision("dddddddddddddddddddddddddddddddddddddddd")
           });
 
           const updated = yield* waitUntilEffect(
-            store.get(snapshot.agentId),
+            store.get(snapshot.agentId).pipe(
+              Effect.map((current) =>
+                Option.match(current, {
+                  onNone: () => null,
+                  onSome: (value) => value
+                })
+              )
+            ),
             awaitingRebaseSnapshot,
             { timeoutMs: 2_000, intervalMs: 10 }
           );
@@ -147,7 +164,7 @@ describe("workspace supervisors", () => {
           yield* harness.controls.setRemoteRef(
             "revis-local",
             harness.syncBranch,
-            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as never
+            asRevision("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
           );
           yield* harness.controls.setRebaseConflict(snapshot.agentId, "merge conflict");
 
@@ -164,11 +181,18 @@ describe("workspace supervisors", () => {
 
           yield* Queue.offer(handle.queue, {
             reason: "manual",
-            syncTargetSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as never
+            syncTargetSha: asRevision("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
           });
 
           const updated = yield* waitUntilEffect(
-            store.get(snapshot.agentId),
+            store.get(snapshot.agentId).pipe(
+              Effect.map((current) =>
+                Option.match(current, {
+                  onNone: () => null,
+                  onSome: (value) => value
+                })
+              )
+            ),
             rebaseConflictSnapshot,
             { timeoutMs: 2_000, intervalMs: 10 }
           );
@@ -195,11 +219,11 @@ describe("workspace supervisors", () => {
           yield* harness.controls.setRemoteRef(
             "revis-local",
             harness.syncBranch,
-            "ffffffffffffffffffffffffffffffffffffffff" as never
+            asRevision("ffffffffffffffffffffffffffffffffffffffff")
           );
           yield* harness.controls.setRebaseSuccess(
             snapshot.agentId,
-            "9999999999999999999999999999999999999999" as never
+            asRevision("9999999999999999999999999999999999999999")
           );
 
           const supervisors = yield* makeWorkspaceSupervisors({
@@ -215,15 +239,22 @@ describe("workspace supervisors", () => {
 
           yield* Queue.offer(handle.queue, {
             reason: "manual",
-            syncTargetSha: "ffffffffffffffffffffffffffffffffffffffff" as never
+            syncTargetSha: asRevision("ffffffffffffffffffffffffffffffffffffffff")
           });
 
           const updated = yield* waitUntilEffect(
-            store.get(snapshot.agentId),
+            store.get(snapshot.agentId).pipe(
+              Effect.map((current) =>
+                Option.match(current, {
+                  onNone: () => null,
+                  onSome: (value) => value
+                })
+              )
+            ),
             (current) => {
               const running = runningSnapshot(current);
               return running?.state.lastRebasedOntoSha ===
-                ("ffffffffffffffffffffffffffffffffffffffff" as never)
+                asRevision("ffffffffffffffffffffffffffffffffffffffff")
                 ? running
                 : null;
             },
@@ -248,10 +279,10 @@ describe("workspace supervisors", () => {
           const provider = yield* WorkspaceProvider;
           const eventJournal = yield* EventJournal;
           const first = makeRestartPendingSnapshot(harness.paths.root, {
-            agentId: "agent-1" as never
+            agentId: asAgentId("agent-1")
           });
           const second = makeRestartPendingSnapshot(harness.paths.root, {
-            agentId: "agent-2" as never
+            agentId: asAgentId("agent-2")
           });
 
           // Give the two workspaces divergent rebase outcomes so the test proves each supervisor
@@ -261,12 +292,12 @@ describe("workspace supervisors", () => {
           yield* harness.controls.setRemoteRef(
             "revis-local",
             harness.syncBranch,
-            "abababababababababababababababababababab" as never
+            asRevision("abababababababababababababababababababab")
           );
           yield* harness.controls.setRebaseConflict(first.agentId, "conflict");
           yield* harness.controls.setRebaseSuccess(
             second.agentId,
-            "1212121212121212121212121212121212121212" as never
+            asRevision("1212121212121212121212121212121212121212")
           );
 
           const supervisors = yield* makeWorkspaceSupervisors({
@@ -283,20 +314,34 @@ describe("workspace supervisors", () => {
 
           yield* Queue.offer(firstHandle.queue, {
             reason: "manual",
-            syncTargetSha: "abababababababababababababababababababab" as never
+            syncTargetSha: asRevision("abababababababababababababababababababab")
           });
           yield* Queue.offer(secondHandle.queue, {
             reason: "manual",
-            syncTargetSha: "abababababababababababababababababababab" as never
+            syncTargetSha: asRevision("abababababababababababababababababababab")
           });
 
           const failed = yield* waitUntilEffect(
-            store.get(first.agentId),
+            store.get(first.agentId).pipe(
+              Effect.map((current) =>
+                Option.match(current, {
+                  onNone: () => null,
+                  onSome: (value) => value
+                })
+              )
+            ),
             rebaseConflictSnapshot,
             { timeoutMs: 2_000, intervalMs: 10 }
           );
           const succeeded = yield* waitUntilEffect(
-            store.get(second.agentId),
+            store.get(second.agentId).pipe(
+              Effect.map((current) =>
+                Option.match(current, {
+                  onNone: () => null,
+                  onSome: (value) => value
+                })
+              )
+            ),
             runningSnapshot,
             { timeoutMs: 2_000, intervalMs: 10 }
           );

@@ -1,6 +1,7 @@
 /** Global reconcile scheduling and fan-out helpers for the daemon. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import type * as Scope from "effect/Scope";
 
@@ -63,10 +64,10 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
 
       // Persist the latest remote state so CLI and dashboard consumers can render it immediately.
       const currentDaemon = yield* options.store.daemonState;
-      if (currentDaemon) {
+      if (Option.isSome(currentDaemon)) {
         yield* options.store.setDaemonState(
           DaemonState.make({
-            ...currentDaemon,
+            ...currentDaemon.value,
             lastFetchAt: isoNow(),
             lastSyncTargetSha: syncTargetSha,
             lastEventAt: isoNow(),
@@ -98,15 +99,17 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
         // Persist the latest daemon error for operators, but keep the reconcile loop alive.
         options.store.daemonState.pipe(
           Effect.flatMap((current) =>
-            current
-              ? options.store.setDaemonState(
+            Option.match(current, {
+              onNone: () => Effect.void,
+              onSome: (daemonState) =>
+                options.store.setDaemonState(
                   DaemonState.make({
-                    ...current,
+                    ...daemonState,
                     lastErrorTag: errorTag(error),
                     lastErrorMessage: formatDomainError(error)
                   })
                 ).pipe(Effect.asVoid)
-              : Effect.void
+            })
           )
         )
       )
@@ -116,9 +119,10 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
 /** Schedule two short follow-up reconciliations after interactive mutations. */
 export function scheduleBurstReconciliations(
   queue: Queue.Queue<ReconcileReason>,
-  reason: Exclude<ReconcileReason, "startup" | "poll">
+  reason: Exclude<ReconcileReason, "startup" | "poll">,
+  scope: Scope.Scope
 ): Effect.Effect<void> {
-  return Effect.fork(
+  return Effect.forkIn(
     Effect.gen(function* () {
       // Interactive mutations can land follow-up refs shortly after the first push, so schedule
       // two delayed reconciles to catch that second wave without tightening the steady-state poll.
@@ -126,6 +130,9 @@ export function scheduleBurstReconciliations(
       yield* Queue.offer(queue, reason);
       yield* Effect.sleep("1 second");
       yield* Queue.offer(queue, reason);
-    }).pipe(Effect.asVoid)
+    }).pipe(Effect.asVoid),
+    // Fork into the daemon scope, not the request fiber, so follow-up reconciles survive the
+    // control endpoint response but still terminate with the daemon.
+    scope
   ).pipe(Effect.asVoid);
 }

@@ -2,11 +2,12 @@
 
 import { Command, Options } from "@effect/cli";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import type { ProjectAppServices } from "../../app/project-layer";
 import { DaemonControl } from "../../daemon/control";
 import { ValidationError } from "../../domain/errors";
-import type { RuntimeEvent } from "../../domain/models";
+import { RuntimeEventSchema } from "../../domain/models";
 import { EventJournal } from "../../services/event-journal";
 import { reportErrors, withProject, writeLine, type CliWriters } from "../runtime";
 
@@ -23,10 +24,11 @@ export function makeEventsCommand(io: CliWriters) {
     const state = yield* daemon.ensureRunning;
 
     yield* Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         // Connect to the daemon-owned event stream.
         const response = await fetch(`${state.apiBaseUrl}/api/events/stream`, {
-          cache: "no-store"
+          cache: "no-store",
+          signal
         });
         if (!response.ok || !response.body) {
           throw new Error(await response.text());
@@ -61,7 +63,7 @@ export function makeEventsCommand(io: CliWriters) {
                 continue;
               }
 
-              const event = JSON.parse(line.slice(6)) as RuntimeEvent;
+              const event = Schema.decodeUnknownSync(RuntimeEventSchema)(JSON.parse(line.slice(6)));
               writeOut(`${event.timestamp} ${event.summary}\n`);
             }
           }

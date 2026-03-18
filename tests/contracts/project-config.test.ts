@@ -53,8 +53,8 @@ describe("ProjectConfig", () => {
 
           // Write an invalid payload directly so the service has to surface a schema failure rather
           // than quietly coercing it.
-          yield* Effect.promise(() => mkdir(paths.revisDir, { recursive: true })).pipe(Effect.orDie);
-          yield* Effect.promise(() => writeFile(paths.configFile, '{"coordinationRemote": true}\n')).pipe(
+          yield* Effect.tryPromise(() => mkdir(paths.revisDir, { recursive: true })).pipe(Effect.orDie);
+          yield* Effect.tryPromise(() => writeFile(paths.configFile, '{"coordinationRemote": true}\n')).pipe(
             Effect.orDie
           );
 

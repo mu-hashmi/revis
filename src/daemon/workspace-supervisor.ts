@@ -2,6 +2,7 @@
 
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import type * as Scope from "effect/Scope";
@@ -300,21 +301,24 @@ export function makeWorkspaceSupervisors(
           Effect.flatMap((signal) =>
             options.store.get(agentId).pipe(
               Effect.flatMap((snapshot) =>
-                snapshot
-                  ? reconcileWorkspace(snapshot, signal).pipe(
+                Option.match(snapshot, {
+                  onNone: () => Effect.void,
+                  onSome: (current) =>
+                    reconcileWorkspace(current, signal).pipe(
                       Effect.catchAll((error) =>
                         // Persist the failure for operator visibility, then keep the supervisor
                         // alive so later reconcile signals can recover the workspace.
                         options.store.get(agentId).pipe(
-                          Effect.flatMap((current) =>
-                            current
-                              ? markProviderFailure(current, error)
-                              : Effect.void
+                          Effect.flatMap((latest) =>
+                            Option.match(latest, {
+                              onNone: () => Effect.void,
+                              onSome: (next) => markProviderFailure(next, error)
+                            })
                           )
                         )
                       )
                     )
-                  : Effect.void
+                })
               )
             )
           )

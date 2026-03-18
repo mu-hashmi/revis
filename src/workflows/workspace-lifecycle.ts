@@ -1,6 +1,7 @@
 /** Workspace provisioning and teardown helpers. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { EventJournal } from "../services/event-journal";
 import { WorkspaceProvider } from "../providers/contract";
@@ -102,22 +103,26 @@ export function stopWorkspace(agentId: string) {
     const store = yield* WorkspaceStore;
     const snapshot = yield* store.get(agentId);
 
-    if (!snapshot) {
-      return null;
-    }
+    return yield* Option.match(snapshot, {
+      onNone: () => Effect.succeed(null),
+      onSome: (current) =>
+        Effect.gen(function* () {
+          // Remove the runtime first so the persisted store and the operator-facing event agree on
+          // the workspace no longer existing.
+          yield* provider.destroyWorkspace(current);
+          yield* store.remove(current.agentId);
+          yield* journal.append(
+            WorkspaceStopped.make({
+              timestamp: isoNow(),
+              agentId: current.agentId,
+              branch: current.spec.coordinationBranch,
+              summary: `Stopped ${current.agentId}`
+            })
+          );
 
-    yield* provider.destroyWorkspace(snapshot);
-    yield* store.remove(snapshot.agentId);
-    yield* journal.append(
-      WorkspaceStopped.make({
-        timestamp: isoNow(),
-        agentId: snapshot.agentId,
-        branch: snapshot.spec.coordinationBranch,
-        summary: `Stopped ${snapshot.agentId}`
-      })
-    );
-
-    return snapshot;
+          return current;
+        })
+    });
   });
 }
 

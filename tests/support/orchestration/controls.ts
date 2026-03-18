@@ -1,6 +1,7 @@
 /** Imperative test controls for steering the orchestration harness. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 
@@ -77,7 +78,12 @@ export function buildOrchestrationControls(
   // Session and workspace mutation controls let tests steer the fake provider deterministically.
   const latestSessionId = (agentId: AgentId | string) =>
     currentWorkspaceRuntime(state, agentId).pipe(
-      Effect.map((workspace) => workspace?.sessions.at(-1)?.id ?? null)
+      Effect.map((workspace) =>
+        Option.match(workspace, {
+          onNone: () => Option.none<string>(),
+          onSome: (current) => Option.fromNullable(current.sessions.at(-1)?.id)
+        })
+      )
     );
 
   const exitSession = (agentId: AgentId | string, exitCode = 0) =>
@@ -92,7 +98,7 @@ export function buildOrchestrationControls(
             }
           : session
       )
-    }));
+    })).pipe(Effect.orDie);
 
   const setWorkspaceHead = (
     agentId: AgentId | string,
@@ -103,13 +109,13 @@ export function buildOrchestrationControls(
       ...workspace,
       head: sha,
       subject
-    }));
+    })).pipe(Effect.orDie);
 
   const setWorkspaceDirty = (agentId: AgentId | string, dirty: boolean) =>
     setWorkspaceState(state, agentId, (workspace) => ({
       ...workspace,
       dirty
-    }));
+    })).pipe(Effect.orDie);
 
   const setRebaseConflict = (agentId: AgentId | string, detail: string) =>
     setWorkspaceState(state, agentId, (workspace) => ({
@@ -118,7 +124,7 @@ export function buildOrchestrationControls(
         _tag: "conflict",
         detail
       }
-    }));
+    })).pipe(Effect.orDie);
 
   const setRebaseSuccess = (agentId: AgentId | string, head?: Revision) =>
     setWorkspaceState(state, agentId, (workspace) => ({
@@ -131,19 +137,19 @@ export function buildOrchestrationControls(
         : {
             _tag: "success"
           }
-    }));
+    })).pipe(Effect.orDie);
 
   const setActivityLines = (agentId: AgentId | string, lines: ReadonlyArray<string>) =>
     setWorkspaceState(state, agentId, (workspace) => ({
       ...workspace,
       activityLines: [...lines]
-    }));
+    })).pipe(Effect.orDie);
 
   const setAheadCount = (agentId: AgentId | string, baseRef: string, count: number) =>
     setWorkspaceState(state, agentId, (workspace) => ({
       ...workspace,
       aheadCounts: new Map(workspace.aheadCounts).set(baseRef, count)
-    }));
+    })).pipe(Effect.orDie);
 
   // Daemon and remote controls exist so global reconcile tests can move host-side state forward
   // independently of the workspace runtime model.

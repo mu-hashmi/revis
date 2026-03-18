@@ -1,6 +1,7 @@
 /** Fake `EventJournal` service backed by the orchestration model state. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -53,7 +54,7 @@ export function buildEventJournalService(
       Effect.gen(function* () {
         const current = yield* Ref.get(state.currentSessionRef);
         if (!current) {
-          return null;
+          return Option.none<SessionMeta>();
         }
 
         // Mirror the live workspace registry into the archived participant list.
@@ -106,13 +107,13 @@ export function buildEventJournalService(
           new Map(currentSessions).set(next.id, next)
         );
 
-        return next;
+        return Option.some(next);
       }),
-    activeSession: Ref.get(state.currentSessionRef),
+    activeSession: Ref.get(state.currentSessionRef).pipe(Effect.map(Option.fromNullable)),
     closeActiveSession: Effect.gen(function* () {
       const current = yield* Ref.get(state.currentSessionRef);
       if (!current) {
-        return null;
+        return Option.none<SessionMeta>();
       }
 
       // Closing the session clears only the "active" pointer; historical meta stays available.
@@ -124,7 +125,7 @@ export function buildEventJournalService(
       yield* Ref.set(state.currentSessionRef, null);
       yield* Ref.update(state.sessionsRef, (all) => new Map(all).set(ended.id, ended));
 
-      return ended;
+      return Option.some(ended);
     }),
     append: (event) =>
       Effect.gen(function* () {
@@ -157,7 +158,7 @@ export function buildEventJournalService(
     ),
     loadSessionMeta: (sessionId) =>
       Ref.get(state.sessionsRef).pipe(
-        Effect.map((sessions) => sessions.get(sessionId) ?? null)
+        Effect.map((sessions) => Option.fromNullable(sessions.get(sessionId)))
       ),
     loadSessionEvents: (_sessionId, limit) =>
       currentEvents(state).pipe(

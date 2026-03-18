@@ -2,21 +2,16 @@
 
 Revis is a coordination CLI for sandboxed coding agent workspaces. See README.md for more details.
 
-<!-- effect-solutions:start -->
 ## Effect Best Practices
 
-**IMPORTANT:** Always consult effect-solutions before writing Effect code.
+**IMPORTANT:** Use the official Effect docs index at [https://effect.website/llms.txt](https://effect.website/llms.txt) and the local Effect source mirror before writing or reviewing Effect code.
 
-1. Run `npx effect-solutions list` to see available guides
-2. Run `npx effect-solutions show <topic>...` for relevant patterns (supports multiple topics)
-3. Search `.reference/effect/` for real implementations; the Effect repo is already cloned locally for reference (if it isn't, clone it there: https://github.com/kitlangton/effect-solutions)
+1. Read `https://effect.website/llms.txt` to find the relevant official docs pages for the API or pattern you need
+2. Use the linked `effect.website` docs as the primary documentation source
+3. Search `.reference/effect/` for real implementations and exact API behavior; the Effect repo is already cloned locally for reference (if it isn't, clone it there: https://github.com/Effect-TS/effect)
+4. When the docs are ambiguous, verify the current installed API against `node_modules/effect/` before changing code
 
-Topics: quick-start, project-setup, tsconfig, basics, services-and-layers, data-modeling, error-handling, config, testing, cli.
-
-Never guess at Effect patterns - check the guide first.
-
-For Effect best practices, always use the skill and references in .agents/skills/effect-best-practices
-<!-- effect-solutions:end -->
+Never guess at Effect patterns - check the official docs and local source first.
 
 ## Conventions
 

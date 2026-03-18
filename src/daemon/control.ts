@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
 import { daemonLayer } from "../app/daemon-layer";
@@ -83,13 +84,13 @@ export const daemonControlLayer = Layer.effect(
     const ensureRunning: Effect.Effect<DaemonState, DaemonControlError> = Effect.gen(function* () {
       const existing = yield* store.daemonState;
 
-      if (existing && (yield* daemonApiReady(existing.apiBaseUrl))) {
-        return existing;
+      if (Option.isSome(existing) && (yield* daemonApiReady(existing.value.apiBaseUrl))) {
+        return existing.value;
       }
 
-      if (existing && processAlive(existing.pid)) {
+      if (Option.isSome(existing) && processAlive(existing.value.pid)) {
         return yield* DaemonUnavailableError.make({
-          message: `Daemon process ${existing.pid} is alive but ${existing.apiBaseUrl} is unavailable`
+          message: `Daemon process ${existing.value.pid} is alive but ${existing.value.apiBaseUrl} is unavailable`
         });
       }
 
@@ -129,16 +130,16 @@ export const daemonControlLayer = Layer.effect(
 
     const shutdown = Effect.gen(function* () {
       const existing = yield* store.daemonState;
-      if (!existing) {
+      if (Option.isNone(existing)) {
         return;
       }
 
-      if (!(yield* daemonApiReady(existing.apiBaseUrl))) {
+      if (!(yield* daemonApiReady(existing.value.apiBaseUrl))) {
         yield* store.clearDaemonState;
         return;
       }
 
-      yield* postControl(existing.apiBaseUrl, "/api/control/shutdown", { reason: "stop" });
+      yield* postControl(existing.value.apiBaseUrl, "/api/control/shutdown", { reason: "stop" });
     });
 
     return DaemonControl.of({
@@ -171,6 +172,9 @@ export const daemonServerProgram = Effect.scoped(
     const shutdown = yield* Deferred.make<void>();
     const reconcileQueue = yield* Queue.unbounded<ReconcileReason>();
     const server = yield* makeDaemonServer();
+    // Burst follow-up reconciles must outlive one HTTP request, but should still die with the
+    // daemon process itself.
+    const daemonScope = yield* Effect.scope;
 
     // Bind the API server and derive the persisted daemon snapshot from the bound address.
     if (server.address._tag !== "TcpAddress") {
@@ -211,7 +215,7 @@ export const daemonServerProgram = Effect.scoped(
       dashboardRoot: paths.dashboardRoot,
       onReconcile: (reason) =>
         Queue.offer(reconcileQueue, reason).pipe(
-          Effect.zipRight(scheduleBurstReconciliations(reconcileQueue, reason)),
+          Effect.zipRight(scheduleBurstReconciliations(reconcileQueue, reason, daemonScope)),
           Effect.asVoid
         ),
       onShutdown: (reason) =>

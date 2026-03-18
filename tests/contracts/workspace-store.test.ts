@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -32,8 +33,18 @@ describe("WorkspaceStore", () => {
         yield* store.upsert(snapshot);
         yield* store.setDaemonState(daemonState);
 
-        expect(yield* store.get(snapshot.agentId)).toStrictEqual(snapshot);
-        expect(yield* store.daemonState).toStrictEqual(daemonState);
+        const storedSnapshot = yield* store.get(snapshot.agentId);
+        const storedDaemonState = yield* store.daemonState;
+        expect(Option.isSome(storedSnapshot)).toBe(true);
+        expect(Option.isSome(storedDaemonState)).toBe(true);
+        if (Option.isNone(storedSnapshot)) {
+          return yield* Effect.dieMessage("Expected stored snapshot to be present");
+        }
+        if (Option.isNone(storedDaemonState)) {
+          return yield* Effect.dieMessage("Expected daemon state to be present");
+        }
+        expect(storedSnapshot.value).toStrictEqual(snapshot);
+        expect(storedDaemonState.value).toStrictEqual(daemonState);
       })
     )
   );
@@ -86,7 +97,12 @@ describe("WorkspaceStore", () => {
         yield* store.upsert(updated);
         yield* store.remove("agent-404");
 
-        expect(yield* store.get(updated.agentId)).toStrictEqual(updated);
+        const storedSnapshot = yield* store.get(updated.agentId);
+        expect(Option.isSome(storedSnapshot)).toBe(true);
+        if (Option.isNone(storedSnapshot)) {
+          return yield* Effect.dieMessage("Expected updated snapshot to be present");
+        }
+        expect(storedSnapshot.value).toStrictEqual(updated);
         expect(yield* store.list).toHaveLength(1);
       })
     )

@@ -1,9 +1,13 @@
 /** Fake `WorkspaceProvider` service backed by the orchestration model state. */
 
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
-import { providerError } from "../../../src/domain/errors";
+import {
+  workspaceCommandError,
+  workspaceProvisionError
+} from "../../../src/domain/errors";
 import {
   type AgentId,
   type Revision,
@@ -37,9 +41,8 @@ export function buildWorkspaceProviderService(
         const syncSha = remoteRefs.get(params.remoteName)?.get(params.syncBranch);
 
         if (!syncSha) {
-          return yield* providerError(
+          return yield* workspaceProvisionError(
             "local",
-            "provision",
             `Missing ${params.remoteName}/${params.syncBranch}`
           );
         }
@@ -107,31 +110,37 @@ export function buildWorkspaceProviderService(
             return { phase: "missing" } satisfies WorkspaceSessionStatus;
           }
 
-          if (!workspace) {
-            return { phase: "missing" } satisfies WorkspaceSessionStatus;
-          }
+          return Option.match(workspace, {
+            onNone: () => ({ phase: "missing" } satisfies WorkspaceSessionStatus),
+            onSome: (current) => {
+              const session = current.sessions.find(
+                (entry) => entry.id === currentState.sessionId
+              );
 
-          const session = workspace.sessions.find(
-            (current) => current.id === currentState.sessionId
-          );
+              if (!session) {
+                return { phase: "missing" } satisfies WorkspaceSessionStatus;
+              }
 
-          if (!session) {
-            return { phase: "missing" } satisfies WorkspaceSessionStatus;
-          }
-
-          return session.phase === "running"
-            ? ({ phase: "running" } satisfies WorkspaceSessionStatus)
-            : session.exitCode === undefined
-              ? ({ phase: "exited" } satisfies WorkspaceSessionStatus)
-              : ({
-                  phase: "exited",
-                  exitCode: session.exitCode
-                } satisfies WorkspaceSessionStatus);
+              return session.phase === "running"
+                ? ({ phase: "running" } satisfies WorkspaceSessionStatus)
+                : session.exitCode === undefined
+                  ? ({ phase: "exited" } satisfies WorkspaceSessionStatus)
+                  : ({
+                      phase: "exited",
+                      exitCode: session.exitCode
+                    } satisfies WorkspaceSessionStatus);
+            }
+          });
         })
       ),
     captureActivity: (snapshot) =>
       currentWorkspaceRuntime(state, snapshot.agentId).pipe(
-        Effect.map((workspace) => workspace?.activityLines ?? [])
+        Effect.map((workspace) =>
+          Option.match(workspace, {
+            onNone: () => [],
+            onSome: (current) => current.activityLines
+          })
+        )
       ),
     runInWorkspace: (snapshot, argv) =>
       Effect.gen(function* () {
@@ -140,11 +149,7 @@ export function buildWorkspaceProviderService(
         // Fail loudly on unknown commands so production git-flow changes break tests immediately
         // instead of silently taking an unrealistic happy path.
         if (argv[0] !== "git") {
-          return yield* providerError(
-            "local",
-            "run command",
-            `Unsupported command: ${argv.join(" ")}`
-          );
+          return yield* workspaceCommandError("local", `Unsupported command: ${argv.join(" ")}`);
         }
 
         switch (argv.join("\u0000")) {
@@ -289,28 +294,28 @@ export function buildWorkspaceProviderService(
           };
         }
 
-        return yield* providerError(
-          "local",
-          "run command",
-          `Unsupported git argv: ${argv.join(" ")}`
-        );
+        return yield* workspaceCommandError("local", `Unsupported git argv: ${argv.join(" ")}`);
       }),
     interruptIteration: (snapshot) =>
-      setWorkspaceState(state, snapshot.agentId, (workspace) => ({
-        ...workspace,
-        sessions: workspace.sessions.map((session, index) =>
-          index === workspace.sessions.length - 1
-            ? {
-                ...session,
-                phase: "exited",
-                exitCode: 130
-              }
-            : session
+      currentWorkspaceRuntime(state, snapshot.agentId).pipe(
+        Effect.flatMap((workspace) =>
+          Option.match(workspace, {
+            onNone: () => Effect.void,
+            onSome: () =>
+              setWorkspaceState(state, snapshot.agentId, (current) => ({
+                ...current,
+                sessions: current.sessions.map((session, index) =>
+                  index === current.sessions.length - 1
+                    ? {
+                        ...session,
+                        phase: "exited",
+                        exitCode: 130
+                      }
+                    : session
+                )
+              }))
+          })
         )
-      })).pipe(
-        // Interrupt is best-effort in the live provider too, so missing workspaces should not
-        // derail higher-level shutdown tests.
-        Effect.catchAllCause(() => Effect.void)
       ),
     destroyWorkspace: (snapshot) =>
       setWorkspaceState(state, snapshot.agentId, (workspace) => ({

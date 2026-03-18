@@ -2,6 +2,7 @@
 
 import type * as PlatformFileSystem from "@effect/platform/FileSystem";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { StorageError, storageError } from "../domain/errors";
@@ -42,23 +43,29 @@ export function readJsonFile<A, I>(
   );
 }
 
-/** Read one JSON file when present, or return `null` for a missing file. */
-export function readJsonFileOrNull<A, I>(
+/** Read and decode one JSON file when present, or return `Option.none()` when absent. */
+export function readJsonFileIfExists<A, I>(
   fs: PlatformFileSystem.FileSystem,
   path: string,
   schema: Schema.Schema<A, I>
-): Effect.Effect<A | null, StorageError> {
+): Effect.Effect<Option.Option<A>, StorageError> {
   return fs.readFileString(path).pipe(
+    Effect.map(Option.some),
     Effect.catchTag("SystemError", (error) =>
-      error.reason === "NotFound" ? Effect.succeed<string | null>(null) : Effect.fail(error)
+      error.reason === "NotFound" ? Effect.succeed(Option.none<string>()) : Effect.fail(error)
     ),
     Effect.mapError((error) => storageError(path, error.message)),
     Effect.flatMap((payload) =>
-      payload === null
-        ? Effect.succeed(null)
-        : Schema.decodeUnknown(Schema.parseJson(schema))(payload).pipe(
+      // Preserve file absence as `Option.none()` at the storage boundary so callers do not need
+      // to round-trip through ad-hoc `null` sentinels.
+      Option.match(payload, {
+        onNone: () => Effect.succeed(Option.none<A>()),
+        onSome: (json) =>
+          Schema.decodeUnknown(Schema.parseJson(schema))(json).pipe(
+            Effect.map(Option.some),
             Effect.mapError((error) => storageError(path, String(error)))
-      )
+          )
+      })
     )
   );
 }

@@ -5,12 +5,16 @@ import {
   HttpServerRequest,
   HttpServerResponse
 } from "@effect/platform";
+import * as Either from "effect/Either";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { HostGit } from "../git/host-git";
 import { loadStatusSnapshot } from "../workflows/load-status";
 import { EventJournal } from "../services/event-journal";
 import { ProjectPaths } from "../services/project-paths";
+import { ValidationError } from "../domain/errors";
 import {
   contentTypeForPath,
   resolveSafePath,
@@ -25,6 +29,18 @@ interface RouterOptions {
   readonly onShutdown: (reason: string) => Effect.Effect<void, unknown>;
   readonly onStop: (agentIds: ReadonlyArray<string>) => Effect.Effect<void, unknown>;
 }
+
+const ReconcileRequest = Schema.Struct({
+  reason: Schema.Literal("spawn", "promote", "manual")
+});
+
+const StopRequest = Schema.Struct({
+  agentIds: Schema.Array(Schema.String)
+});
+
+const ShutdownRequest = Schema.Struct({
+  reason: Schema.optional(Schema.String)
+});
 
 /** Build the daemon HTTP router. */
 export function daemonRouter(options: RouterOptions) {
@@ -74,9 +90,11 @@ function handleGetRequest(options: RouterOptions) {
       const eventJournal = yield* EventJournal;
       const meta = yield* eventJournal.loadSessionMeta(sessionId);
 
-      return meta
-        ? yield* HttpServerResponse.json(meta)
-        : HttpServerResponse.text("Not found\n", { status: 404 });
+      if (Option.isSome(meta)) {
+        return yield* HttpServerResponse.json(meta.value);
+      }
+
+      return HttpServerResponse.text("Not found\n", { status: 404 });
     }
 
     if (url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/events")) {
@@ -109,9 +127,13 @@ function handleGetRequest(options: RouterOptions) {
 
     // Everything else is served from the packaged dashboard bundle.
     const assetPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const safePath = yield* resolveSafePath(options.dashboardRoot, assetPath).pipe(Effect.either);
+    if (Either.isLeft(safePath)) {
+      return HttpServerResponse.text(`${safePath.left.message}\n`, { status: 400 });
+    }
 
     return yield* respondStaticFile(
-      resolveSafePath(options.dashboardRoot, assetPath),
+      safePath.right,
       contentTypeForPath(assetPath)
     );
   }).pipe(
@@ -130,31 +152,52 @@ function handlePostRequest(options: RouterOptions) {
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = new URL(request.url, "http://localhost");
-    const body = (yield* Effect.orDie(request.json)) as Record<string, unknown>;
 
     // Interactive reconcile requests from CLI commands.
     if (url.pathname === "/api/control/reconcile") {
-      const reason = body.reason;
-      if (reason !== "spawn" && reason !== "promote" && reason !== "manual") {
-        return HttpServerResponse.text("Invalid reconcile reason\n", { status: 400 });
+      const body = yield* HttpServerRequest.schemaBodyJson(ReconcileRequest).pipe(
+        Effect.mapError((error) =>
+          ValidationError.make({ message: String(error) })
+        ),
+        Effect.either
+      );
+      if (Either.isLeft(body)) {
+        return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
       }
 
-      yield* options.onReconcile(reason);
+      yield* options.onReconcile(body.right.reason);
       return yield* HttpServerResponse.json({ ok: true });
     }
 
     // Workspace stop requests share one endpoint for targeted or stop-all operations.
     if (url.pathname === "/api/control/stop") {
-      const agentIds = Array.isArray(body.agentIds)
-        ? body.agentIds.map(String)
-        : [];
-      yield* options.onStop(agentIds);
+      const body = yield* HttpServerRequest.schemaBodyJson(StopRequest).pipe(
+        Effect.mapError((error) =>
+          ValidationError.make({ message: String(error) })
+        ),
+        Effect.either
+      );
+      if (Either.isLeft(body)) {
+        return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
+      }
+
+      yield* options.onStop(body.right.agentIds);
       return yield* HttpServerResponse.json({ ok: true });
     }
 
     // Shutdown is separate so the daemon can flush final state before exiting.
     if (url.pathname === "/api/control/shutdown") {
-      yield* options.onShutdown(typeof body.reason === "string" ? body.reason : "shutdown");
+      const body = yield* HttpServerRequest.schemaBodyJson(ShutdownRequest).pipe(
+        Effect.mapError((error) =>
+          ValidationError.make({ message: String(error) })
+        ),
+        Effect.either
+      );
+      if (Either.isLeft(body)) {
+        return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
+      }
+
+      yield* options.onShutdown(body.right.reason ?? "shutdown");
       return yield* HttpServerResponse.json({ ok: true });
     }
 
