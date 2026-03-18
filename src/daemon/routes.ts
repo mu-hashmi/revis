@@ -86,56 +86,24 @@ function handleGetRequest(options: RouterOptions) {
     }
 
     if (url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/meta")) {
-      const sessionId = url.pathname.slice("/api/sessions/".length, -"/meta".length);
-      const eventJournal = yield* EventJournal;
-      const meta = yield* eventJournal.loadSessionMeta(sessionId);
-
-      if (Option.isSome(meta)) {
-        return yield* HttpServerResponse.json(meta.value);
-      }
-
-      return HttpServerResponse.text("Not found\n", { status: 404 });
+      return yield* loadSessionMetaResponse(sessionIdFromPath(url.pathname, "/meta"));
     }
 
     if (url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/events")) {
-      const sessionId = url.pathname.slice("/api/sessions/".length, -"/events".length);
       const limit = Number.parseInt(url.searchParams.get("limit") ?? "0", 10);
-      const eventJournal = yield* EventJournal;
-      const events = yield* eventJournal.loadSessionEvents(
-        sessionId,
+      return yield* loadSessionEventsResponse(
+        sessionIdFromPath(url.pathname, "/events"),
         Number.isFinite(limit) && limit > 0 ? limit : undefined
       );
-
-      return yield* HttpServerResponse.json(events);
     }
 
     // Raw git commit detail used by the dashboard event panel.
     if (url.pathname === "/api/git/show") {
-      const sha = url.searchParams.get("sha");
-      if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha)) {
-        return HttpServerResponse.text("Expected a commit SHA\n", { status: 400 });
-      }
-
-      const hostGit = yield* HostGit;
-      const paths = yield* ProjectPaths;
-
-      const payload = yield* hostGit.showCommit(paths.root, sha);
-      return HttpServerResponse.text(payload, {
-        headers: { "Cache-Control": "no-store" }
-      });
+      return yield* showCommitResponse(url.searchParams.get("sha"));
     }
 
     // Everything else is served from the packaged dashboard bundle.
-    const assetPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    const safePath = yield* resolveSafePath(options.dashboardRoot, assetPath).pipe(Effect.either);
-    if (Either.isLeft(safePath)) {
-      return HttpServerResponse.text(`${safePath.left.message}\n`, { status: 400 });
-    }
-
-    return yield* respondStaticFile(
-      safePath.right,
-      contentTypeForPath(assetPath)
-    );
+    return yield* serveDashboardAsset(options.dashboardRoot, url.pathname);
   }).pipe(
     Effect.catchAll((error) =>
       Effect.succeed(
@@ -155,12 +123,7 @@ function handlePostRequest(options: RouterOptions) {
 
     // Interactive reconcile requests from CLI commands.
     if (url.pathname === "/api/control/reconcile") {
-      const body = yield* HttpServerRequest.schemaBodyJson(ReconcileRequest).pipe(
-        Effect.mapError((error) =>
-          ValidationError.make({ message: String(error) })
-        ),
-        Effect.either
-      );
+      const body = yield* readJsonBody(ReconcileRequest);
       if (Either.isLeft(body)) {
         return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
       }
@@ -171,12 +134,7 @@ function handlePostRequest(options: RouterOptions) {
 
     // Workspace stop requests share one endpoint for targeted or stop-all operations.
     if (url.pathname === "/api/control/stop") {
-      const body = yield* HttpServerRequest.schemaBodyJson(StopRequest).pipe(
-        Effect.mapError((error) =>
-          ValidationError.make({ message: String(error) })
-        ),
-        Effect.either
-      );
+      const body = yield* readJsonBody(StopRequest);
       if (Either.isLeft(body)) {
         return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
       }
@@ -187,12 +145,7 @@ function handlePostRequest(options: RouterOptions) {
 
     // Shutdown is separate so the daemon can flush final state before exiting.
     if (url.pathname === "/api/control/shutdown") {
-      const body = yield* HttpServerRequest.schemaBodyJson(ShutdownRequest).pipe(
-        Effect.mapError((error) =>
-          ValidationError.make({ message: String(error) })
-        ),
-        Effect.either
-      );
+      const body = yield* readJsonBody(ShutdownRequest);
       if (Either.isLeft(body)) {
         return HttpServerResponse.text(`${body.left.message}\n`, { status: 400 });
       }
@@ -203,4 +156,69 @@ function handlePostRequest(options: RouterOptions) {
 
     return HttpServerResponse.text("Not found\n", { status: 404 });
   });
+}
+
+/** Extract one session id from `/api/sessions/<id>/<suffix>` paths. */
+function sessionIdFromPath(pathname: string, suffix: "/meta" | "/events"): string {
+  return pathname.slice("/api/sessions/".length, -suffix.length);
+}
+
+/** Load the archived metadata payload for one session id. */
+function loadSessionMetaResponse(sessionId: string) {
+  return Effect.gen(function* () {
+    const eventJournal = yield* EventJournal;
+    const meta = yield* eventJournal.loadSessionMeta(sessionId);
+    if (Option.isNone(meta)) {
+      return HttpServerResponse.text("Not found\n", { status: 404 });
+    }
+
+    return yield* HttpServerResponse.json(meta.value);
+  });
+}
+
+/** Load the archived event payload for one session id. */
+function loadSessionEventsResponse(sessionId: string, limit?: number) {
+  return Effect.gen(function* () {
+    const eventJournal = yield* EventJournal;
+    const events = yield* eventJournal.loadSessionEvents(sessionId, limit);
+    return yield* HttpServerResponse.json(events);
+  });
+}
+
+/** Load raw git commit detail for the dashboard event inspector. */
+function showCommitResponse(sha: string | null) {
+  return Effect.gen(function* () {
+    if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha)) {
+      return HttpServerResponse.text("Expected a commit SHA\n", { status: 400 });
+    }
+
+    const hostGit = yield* HostGit;
+    const paths = yield* ProjectPaths;
+    const payload = yield* hostGit.showCommit(paths.root, sha);
+
+    return HttpServerResponse.text(payload, {
+      headers: { "Cache-Control": "no-store" }
+    });
+  });
+}
+
+/** Resolve and serve one packaged dashboard asset path. */
+function serveDashboardAsset(dashboardRoot: string, pathname: string) {
+  return Effect.gen(function* () {
+    const assetPath = pathname === "/" ? "index.html" : pathname.slice(1);
+    const safePath = yield* resolveSafePath(dashboardRoot, assetPath).pipe(Effect.either);
+    if (Either.isLeft(safePath)) {
+      return HttpServerResponse.text(`${safePath.left.message}\n`, { status: 400 });
+    }
+
+    return yield* respondStaticFile(safePath.right, contentTypeForPath(assetPath));
+  });
+}
+
+/** Decode one JSON request body into an `Either` for route-level validation handling. */
+function readJsonBody<A, I>(schema: Schema.Schema<A, I>) {
+  return HttpServerRequest.schemaBodyJson(schema).pipe(
+    Effect.mapError((error) => ValidationError.make({ message: String(error) })),
+    Effect.either
+  );
 }

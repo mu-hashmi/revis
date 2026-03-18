@@ -103,15 +103,12 @@ export const localWorkspaceProviderLayer = Layer.effect(
     const startIteration = Effect.fn("WorkspaceProvider.local.startIteration")(function* (
       snapshot: WorkspaceSnapshot
     ) {
-      // Reset the runtime files that the daemon uses to inspect detached process state.
       const logPath = paths.workspaceLogFile(snapshot.agentId);
       const exitPath = paths.workspaceExitFile(snapshot.agentId);
       const shell = process.env.SHELL ?? "/bin/sh";
 
-      yield* Effect.tryPromise({
-        try: () => Promise.all([writeFile(logPath, "", "utf8"), rm(exitPath, { force: true })]),
-        catch: (error) => workspaceStartError("local", String(error))
-      });
+      // Reset the runtime files that the daemon uses to inspect detached process state.
+      yield* resetLocalIterationFiles(logPath, exitPath);
 
       return yield* Effect.acquireUseRelease(
         Effect.tryPromise({
@@ -119,45 +116,13 @@ export const localWorkspaceProviderLayer = Layer.effect(
           catch: (error) => workspaceStartError("local", String(error))
         }),
         (logHandle) =>
-          Effect.gen(function* () {
-            // Spawn one detached shell so the workspace can keep running after the CLI exits. The
-            // wrapper persists the final exit code because the daemon may observe the session after
-            // the original CLI process is already gone.
-            const child = spawn(
-              shell,
-              [
-                "-lc",
-                localWrapperScript(
-                  snapshot.spec.execCommand,
-                  exitPath,
-                  workspaceIteration(snapshot) + 1
-                )
-              ],
-              {
-                cwd: snapshot.spec.workspaceRoot,
-                detached: true,
-                env: process.env,
-                stdio: ["ignore", logHandle.fd, logHandle.fd]
-              }
-            );
-
-            yield* Effect.tryPromise({
-              try: () =>
-                new Promise<void>((resolve, reject) => {
-                  child.once("spawn", () => resolve());
-                  child.once("error", reject);
-                }),
-              catch: (error) => workspaceStartError("local", String(error))
-            });
-
-            child.unref();
-
-            if (!child.pid) {
-              return yield* workspaceStartError("local", `No pid returned for ${snapshot.agentId}`);
-            }
-
-            return asWorkspaceSessionId(String(child.pid));
-          }),
+          spawnDetachedIteration(
+            snapshot,
+            shell,
+            exitPath,
+            workspaceIteration(snapshot) + 1,
+            logHandle.fd
+          ),
         (logHandle) =>
           Effect.tryPromise({
             try: () => logHandle.close(),
@@ -187,13 +152,8 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // Trust the persisted exit file before probing the pid. The child can exit and be reaped
       // before `kill(pid, 0)` becomes authoritative, but the wrapper still leaves behind the final
       // session status that the daemon needs.
-      if (yield* pathExists(exitPath, (error) => workspaceInspectError("local", String(error)))) {
-        const payload = yield* Effect.tryPromise({
-          try: () => readFile(exitPath, "utf8"),
-          catch: (error) => workspaceInspectError("local", String(error))
-        });
-        const exitCode = Number.parseInt(payload.trim(), 10);
-
+      const exitCode = yield* readLocalExitCode(exitPath);
+      if (exitCode !== null) {
         return Number.isFinite(exitCode)
           ? ({ phase: "exited", exitCode } satisfies WorkspaceSessionStatus)
           : ({ phase: "exited" } satisfies WorkspaceSessionStatus);
@@ -308,6 +268,75 @@ function pathExists<E>(
       }
     },
     catch: onError
+  });
+}
+
+/** Reset the log and exit files that describe one detached local iteration. */
+function resetLocalIterationFiles(logPath: string, exitPath: string) {
+  return Effect.tryPromise({
+    try: () => Promise.all([writeFile(logPath, "", "utf8"), rm(exitPath, { force: true })]),
+    catch: (error) => workspaceStartError("local", String(error))
+  });
+}
+
+/** Spawn one detached shell iteration and return its pid-backed session id. */
+function spawnDetachedIteration(
+  snapshot: WorkspaceSnapshot,
+  shell: string,
+  exitPath: string,
+  iteration: number,
+  logFd: number
+) {
+  return Effect.gen(function* () {
+    // Spawn one detached shell so the workspace can keep running after the CLI exits. The
+    // wrapper persists the final exit code because the daemon may observe the session after
+    // the original CLI process is already gone.
+    const child = spawn(
+      shell,
+      ["-lc", localWrapperScript(snapshot.spec.execCommand, exitPath, iteration)],
+      {
+        cwd: snapshot.spec.workspaceRoot,
+        detached: true,
+        env: process.env,
+        stdio: ["ignore", logFd, logFd]
+      }
+    );
+
+    yield* Effect.tryPromise({
+      try: () =>
+        new Promise<void>((resolve, reject) => {
+          child.once("spawn", () => resolve());
+          child.once("error", reject);
+        }),
+      catch: (error) => workspaceStartError("local", String(error))
+    });
+
+    child.unref();
+
+    if (!child.pid) {
+      return yield* workspaceStartError("local", `No pid returned for ${snapshot.agentId}`);
+    }
+
+    return asWorkspaceSessionId(String(child.pid));
+  });
+}
+
+/** Read the persisted local exit code when the wrapper already wrote one. */
+function readLocalExitCode(exitPath: string) {
+  return Effect.gen(function* () {
+    const exitFileExists = yield* pathExists(exitPath, (error) =>
+      workspaceInspectError("local", String(error))
+    );
+    if (!exitFileExists) {
+      return null;
+    }
+
+    const payload = yield* Effect.tryPromise({
+      try: () => readFile(exitPath, "utf8"),
+      catch: (error) => workspaceInspectError("local", String(error))
+    });
+
+    return Number.parseInt(payload.trim(), 10);
   });
 }
 

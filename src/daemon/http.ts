@@ -184,6 +184,19 @@ export function waitForDaemonState(
 
 /** Read the persisted daemon state directly from disk so cross-process startup can observe it. */
 function loadDaemonState(path: string): Effect.Effect<DaemonState | null, StorageError> {
+  return readMaybeMissingFile(path).pipe(
+    Effect.flatMap((payload) => {
+      if (payload === null) {
+        return Effect.succeed(null);
+      }
+
+      return decodeDaemonState(path, payload);
+    })
+  );
+}
+
+/** Read one file and treat ENOENT as an expected "not ready yet" state. */
+function readMaybeMissingFile(path: string): Effect.Effect<string | null, StorageError> {
   return Effect.tryPromise({
     try: async () => {
       // Startup races legitimately hit ENOENT before the daemon writes its first ready snapshot.
@@ -204,15 +217,17 @@ function loadDaemonState(path: string): Effect.Effect<DaemonState | null, Storag
       error._tag === "StorageError"
         ? (error as StorageError)
         : storageError(path, error instanceof Error ? error.message : String(error))
-  }).pipe(
-    Effect.flatMap((payload) =>
-      payload === null
-        ? Effect.succeed(null)
-        : Schema.decodeUnknown(Schema.parseJson(DaemonState))(payload).pipe(
-            // Parse failures mean the daemon wrote an invalid snapshot; surface that as storage
-            // corruption instead of silently retrying forever.
-            Effect.mapError((error) => storageError(path, String(error)))
-          )
-    )
+  });
+}
+
+/** Decode one persisted daemon snapshot and surface corruption as `StorageError`. */
+function decodeDaemonState(
+  path: string,
+  payload: string
+): Effect.Effect<DaemonState, StorageError> {
+  return Schema.decodeUnknown(Schema.parseJson(DaemonState))(payload).pipe(
+    // Parse failures mean the daemon wrote an invalid snapshot; surface that as storage
+    // corruption instead of silently retrying forever.
+    Effect.mapError((error) => storageError(path, String(error)))
   );
 }

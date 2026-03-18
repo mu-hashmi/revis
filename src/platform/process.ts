@@ -102,12 +102,13 @@ export function runCommandWith(
 ): Effect.Effect<CompletedCommand, CommandFailure> {
   return Effect.scoped(
     Effect.gen(function* () {
+      const commandText = shellJoin(argv);
       const command = buildCommand(argv, options);
 
       const processHandle = yield* executor.start(command).pipe(
         Effect.mapError((error) =>
           CommandError.make({
-            command: shellJoin(argv),
+            command: commandText,
             message: String(error)
           })
         )
@@ -121,7 +122,7 @@ export function runCommandWith(
             Effect.map(Number),
             Effect.mapError((error) =>
               CommandError.make({
-                command: shellJoin(argv),
+                command: commandText,
                 message: String(error)
               })
             )
@@ -247,6 +248,7 @@ async function waitForReadySignal(
   signal: AbortSignal
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
+    const commandText = shellJoin(argv);
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -268,7 +270,7 @@ async function waitForReadySignal(
     const timer = setTimeout(() => {
       settle(() => {
         terminateChildProcess(child);
-        reject(new Error(`${shellJoin(argv)} did not become ready in time`));
+        reject(new Error(`${commandText} did not become ready in time`));
       });
     }, options.timeoutMs);
 
@@ -288,7 +290,7 @@ async function waitForReadySignal(
     const onAbort = (): void => {
       settle(() => {
         terminateChildProcess(child);
-        reject(new Error(`${shellJoin(argv)} startup interrupted`));
+        reject(new Error(`${commandText} startup interrupted`));
       });
     };
 
@@ -298,7 +300,7 @@ async function waitForReadySignal(
         child.unref();
         settle(() => {
           if (child.pid === undefined) {
-            reject(new Error(`${shellJoin(argv)} started without a pid`));
+            reject(new Error(`${commandText} started without a pid`));
             return;
           }
 
@@ -321,7 +323,7 @@ async function waitForReadySignal(
           new Error(
             stderr.trim() ||
               stdout.trim() ||
-              `${shellJoin(argv)} exited before ready${closeSignal ? ` (${closeSignal})` : ""}`
+              `${commandText} exited before ready${closeSignal ? ` (${closeSignal})` : ""}`
           )
         )
       );
@@ -344,7 +346,7 @@ async function waitForReadySignal(
   });
 }
 
-    /** Terminate one not-yet-ready detached child process. */
+/** Terminate one not-yet-ready detached child process. */
 function terminateChildProcess(child: ChildProcessByStdio<null, Readable, Readable>): void {
   if (child.exitCode !== null || child.signalCode !== null) {
     return;

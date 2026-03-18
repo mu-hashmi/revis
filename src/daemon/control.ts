@@ -80,6 +80,16 @@ export const daemonControlLayer = Layer.effect(
     const configService = yield* ProjectConfig;
     const paths = yield* ProjectPaths;
     const store = yield* WorkspaceStore;
+    const spawnDaemon = (timeoutMs: number) =>
+      spawnReadyProcess([...currentRevisCommand(), "_daemon-run", "--root", paths.root], {
+        cwd: paths.root,
+        env: {
+          ...process.env,
+          REVIS_DAEMON_READY_STDOUT: "1"
+        },
+        readyLine: DAEMON_READY_LINE,
+        timeoutMs
+      });
 
     const ensureRunning: Effect.Effect<DaemonState, DaemonControlError> = Effect.gen(function* () {
       const existing = yield* store.daemonState;
@@ -95,23 +105,10 @@ export const daemonControlLayer = Layer.effect(
       }
 
       const config = yield* configService.load;
-      const argv = [...currentRevisCommand(), "_daemon-run", "--root", paths.root];
+      const timeoutMs = daemonStartTimeoutMs(config.sandboxProvider);
 
-      yield* spawnReadyProcess(argv, {
-        cwd: paths.root,
-        env: {
-          ...process.env,
-          REVIS_DAEMON_READY_STDOUT: "1"
-        },
-        readyLine: DAEMON_READY_LINE,
-        timeoutMs:
-          config.sandboxProvider === "daytona" ? DAYTONA_START_TIMEOUT_MS : START_TIMEOUT_MS
-      });
-
-      return yield* waitForDaemonState(
-        paths.daemonStateFile,
-        config.sandboxProvider === "daytona" ? DAYTONA_START_TIMEOUT_MS : START_TIMEOUT_MS
-      );
+      yield* spawnDaemon(timeoutMs);
+      return yield* waitForDaemonState(paths.daemonStateFile, timeoutMs);
     });
 
     const reconcile = (
@@ -209,25 +206,27 @@ export const daemonServerProgram = Effect.scoped(
       store,
       syncBranch
     });
+    const queueReconcile = (reason: Exclude<ReconcileReason, "startup" | "poll">) =>
+      Queue.offer(reconcileQueue, reason).pipe(
+        Effect.zipRight(scheduleBurstReconciliations(reconcileQueue, reason, daemonScope)),
+        Effect.asVoid
+      );
+    const requestShutdown = (reason: string) =>
+      eventJournal.append(
+        DaemonStopped.make({
+          timestamp: isoNow(),
+          summary: `Daemon stopping (${reason})`
+        })
+      ).pipe(
+        Effect.zipRight(Deferred.succeed(shutdown, undefined)),
+        Effect.asVoid
+      );
 
     // Build the transport router after the runtime control callbacks exist.
     const router = daemonRouter({
       dashboardRoot: paths.dashboardRoot,
-      onReconcile: (reason) =>
-        Queue.offer(reconcileQueue, reason).pipe(
-          Effect.zipRight(scheduleBurstReconciliations(reconcileQueue, reason, daemonScope)),
-          Effect.asVoid
-        ),
-      onShutdown: (reason) =>
-        eventJournal.append(
-          DaemonStopped.make({
-            timestamp: isoNow(),
-            summary: `Daemon stopping (${reason})`
-          })
-        ).pipe(
-          Effect.zipRight(Deferred.succeed(shutdown, undefined)),
-          Effect.asVoid
-      ),
+      onReconcile: queueReconcile,
+      onShutdown: requestShutdown,
       onStop: supervisors.stopWorkspaces
     });
 
@@ -294,4 +293,9 @@ function syncParticipants(
       eventJournal.syncParticipants(snapshots).pipe(Effect.asVoid)
     )
   );
+}
+
+/** Return the daemon startup timeout for the configured sandbox provider. */
+function daemonStartTimeoutMs(provider: DaemonState["sandboxProvider"]): number {
+  return provider === "daytona" ? DAYTONA_START_TIMEOUT_MS : START_TIMEOUT_MS;
 }

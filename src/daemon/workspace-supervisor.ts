@@ -21,6 +21,7 @@ import {
   WorkspaceRebaseFailed,
   WorkspaceRebased,
   WorkspaceRestarted,
+  type Revision,
   type WorkspaceSnapshot
 } from "../domain/models";
 import {
@@ -31,7 +32,7 @@ import {
   workspaceWorkingTreeDirty
 } from "../git/workspace-ops";
 import { isoNow } from "../platform/time";
-import type { WorkspaceProviderApi } from "../providers/contract";
+import type { WorkspaceProviderApi, WorkspaceSessionStatus } from "../providers/contract";
 import type { EventJournalApi } from "../services/event-journal";
 import type { WorkspaceStoreApi } from "../services/workspace-store";
 import { trackingFields, withState, withTracking } from "./state";
@@ -81,6 +82,247 @@ export function makeWorkspaceSupervisors(
         )
       );
 
+    /** Persist the latest observed workspace HEAD when it changed. */
+    const syncObservedHead = (snapshot: WorkspaceSnapshot, headSha: Revision) =>
+      Effect.gen(function* () {
+        if (snapshot.state.lastCommitSha === headSha) {
+          return snapshot;
+        }
+
+        const next = withTracking(snapshot, { lastCommitSha: headSha });
+        yield* persistSnapshot(next);
+        return next;
+      });
+
+    /** Publish the workspace HEAD when it moved since the last reconcile. */
+    const publishWorkspaceHeadIfNeeded = (snapshot: WorkspaceSnapshot, headSha: Revision) =>
+      Effect.gen(function* () {
+        if (snapshot.state.lastPushedSha === headSha) {
+          return snapshot;
+        }
+
+        const pushedSha = yield* pushWorkspaceHead(
+          options.provider,
+          snapshot,
+          options.config.coordinationRemote
+        );
+        const next = withTracking(snapshot, {
+          lastCommitSha: headSha,
+          lastPushedSha: pushedSha
+        });
+
+        yield* persistSnapshot(next);
+        yield* options.eventJournal.append(
+          BranchPublished.make({
+            timestamp: isoNow(),
+            agentId: next.agentId,
+            branch: next.spec.coordinationBranch,
+            sha: pushedSha,
+            summary: `Published ${next.agentId}`
+          })
+        );
+
+        return next;
+      });
+
+    /** Persist and announce that the workspace needs manual cleanup before rebasing. */
+    const markAwaitingRebase = (snapshot: WorkspaceSnapshot, signal: WorkspaceSignal) =>
+      Effect.gen(function* () {
+        const next = withState(
+          snapshot,
+          AwaitingRebaseState.make({
+            ...trackingFields(snapshot),
+            requiredTarget: signal.syncTargetSha,
+            detail: `Workspace must rebase onto ${signal.syncTargetSha.slice(0, 8)}`
+          })
+        );
+
+        yield* persistSnapshot(next);
+        yield* options.eventJournal.append(
+          WorkspaceRebaseAwaiting.make({
+            timestamp: isoNow(),
+            agentId: next.agentId,
+            branch: next.spec.coordinationBranch,
+            target: signal.syncTargetSha,
+            summary: `${next.agentId} is waiting for a clean rebase`
+          })
+        );
+      });
+
+    /** Persist and announce one automatic rebase conflict. */
+    const markRebaseConflict = (
+      snapshot: WorkspaceSnapshot,
+      signal: WorkspaceSignal,
+      detail: string
+    ) =>
+      persistSnapshot(
+        withState(
+          snapshot,
+          RebaseConflictState.make({
+            ...trackingFields(snapshot),
+            requiredTarget: signal.syncTargetSha,
+            detail
+          })
+        )
+      ).pipe(
+        Effect.zipRight(
+          options.eventJournal.append(
+            WorkspaceRebaseFailed.make({
+              timestamp: isoNow(),
+              agentId: snapshot.agentId,
+              branch: snapshot.spec.coordinationBranch,
+              target: signal.syncTargetSha,
+              detail,
+              summary: `${snapshot.agentId} hit a rebase conflict`
+            })
+          )
+        ),
+        Effect.as(null)
+      );
+
+    /** Bring the workspace onto the latest sync target when required. */
+    const rebaseWorkspaceIfNeeded = (
+      snapshot: WorkspaceSnapshot,
+      signal: WorkspaceSignal,
+      inspected: WorkspaceSessionStatus
+    ): Effect.Effect<WorkspaceSnapshot | null, unknown> =>
+      Effect.gen(function* () {
+        if (snapshot.state.lastRebasedOntoSha === signal.syncTargetSha) {
+          return snapshot;
+        }
+
+        const dirty = yield* workspaceWorkingTreeDirty(options.provider, snapshot);
+        if (dirty) {
+          yield* markAwaitingRebase(snapshot, signal);
+          return null;
+        }
+
+        if (inspected.phase === "running") {
+          // Rebase only from a stopped checkout so agent work and git history are never
+          // mutated concurrently inside the same workspace.
+          yield* options.provider.interruptIteration(snapshot);
+          yield* persistSnapshot(
+            withState(snapshot, RestartPendingState.make(trackingFields(snapshot)))
+          );
+          return null;
+        }
+
+        const rebasedSha = yield* rebaseWorkspaceOntoSyncTarget(
+          options.provider,
+          snapshot,
+          options.config.coordinationRemote,
+          options.syncBranch,
+          signal.syncTargetSha
+        ).pipe(
+          Effect.catchTag("RebaseConflictError", (error) =>
+            markRebaseConflict(snapshot, signal, error.detail)
+          )
+        );
+        if (rebasedSha === null) {
+          return null;
+        }
+
+        const next = withState(
+          snapshot,
+          RestartPendingState.make({
+            ...trackingFields(snapshot),
+            lastCommitSha: rebasedSha,
+            lastRebasedOntoSha: signal.syncTargetSha
+          })
+        );
+
+        yield* persistSnapshot(next);
+        yield* options.eventJournal.append(
+          WorkspaceRebased.make({
+            timestamp: isoNow(),
+            agentId: next.agentId,
+            branch: next.spec.coordinationBranch,
+            target: signal.syncTargetSha,
+            summary: `${next.agentId} rebased onto ${signal.syncTargetSha.slice(0, 8)}`
+          })
+        );
+
+        return next;
+      });
+
+    /** Persist one exited iteration before the next restart begins. */
+    const recordIterationExit = (
+      initial: WorkspaceSnapshot,
+      snapshot: WorkspaceSnapshot,
+      inspected: WorkspaceSessionStatus
+    ) =>
+      Effect.gen(function* () {
+        if (!(inspected.phase === "exited" && initial.state._tag === "Running")) {
+          return snapshot;
+        }
+
+        const next = withState(
+          snapshot,
+          RestartPendingState.make({
+            ...trackingFields(snapshot),
+            lastExitCode: inspected.exitCode,
+            lastExitedAt: isoNow()
+          })
+        );
+
+        yield* persistSnapshot(next);
+        yield* options.eventJournal.append(
+          IterationExited.make({
+            timestamp: isoNow(),
+            agentId: next.agentId,
+            branch: next.spec.coordinationBranch,
+            exitCode: inspected.exitCode,
+            summary: `${next.agentId} iteration exited`
+          })
+        );
+
+        return next;
+      });
+
+    /** Start the next iteration when the workspace is currently stopped. */
+    const startNextIteration = (snapshot: WorkspaceSnapshot, inspected: WorkspaceSessionStatus) =>
+      Effect.gen(function* () {
+        if (inspected.phase === "running") {
+          return;
+        }
+
+        const sessionId = yield* options.provider.startIteration(snapshot);
+        const nextIteration = snapshot.state.iteration + 1;
+        const startedAt = isoNow();
+        const restarted = nextIteration > 1 || inspected.phase === "exited";
+        const running = withState(
+          snapshot,
+          RunningState.make({
+            ...trackingFields(snapshot),
+            iteration: nextIteration,
+            sessionId,
+            startedAt
+          })
+        );
+
+        yield* persistSnapshot(running);
+
+        if (restarted) {
+          yield* options.eventJournal.append(
+            WorkspaceRestarted.make({
+              timestamp: startedAt,
+              agentId: running.agentId,
+              branch: running.spec.coordinationBranch,
+              summary: `Restarted ${running.agentId}`
+            })
+          );
+        }
+
+        yield* options.eventJournal.append(
+          IterationStarted.make({
+            timestamp: startedAt,
+            agentId: running.agentId,
+            branch: running.spec.coordinationBranch,
+            summary: `Started iteration ${nextIteration} for ${running.agentId}`
+          })
+        );
+      });
+
     /** Reconcile one workspace against the latest sync target and provider session state. */
     const reconcileWorkspace = (
       initial: WorkspaceSnapshot,
@@ -97,35 +339,10 @@ export function makeWorkspaceSupervisors(
         // Inspect the current provider session and refresh cached workspace HEAD metadata.
         const inspected = yield* options.provider.inspectSession(snapshot);
         const headSha = yield* workspaceHeadSha(options.provider, snapshot);
-
-        if (snapshot.state.lastCommitSha !== headSha) {
-          snapshot = withTracking(snapshot, { lastCommitSha: headSha });
-          yield* persistSnapshot(snapshot);
-        }
+        snapshot = yield* syncObservedHead(snapshot, headSha);
 
         // Publish newly created local commits back to the stable coordination branch.
-        if (snapshot.state.lastPushedSha !== headSha) {
-          const pushedSha = yield* pushWorkspaceHead(
-            options.provider,
-            snapshot,
-            options.config.coordinationRemote
-          );
-
-          snapshot = withTracking(snapshot, {
-            lastCommitSha: headSha,
-            lastPushedSha: pushedSha
-          });
-          yield* persistSnapshot(snapshot);
-          yield* options.eventJournal.append(
-            BranchPublished.make({
-              timestamp: isoNow(),
-              agentId: snapshot.agentId,
-              branch: snapshot.spec.coordinationBranch,
-              sha: pushedSha,
-              summary: `Published ${snapshot.agentId}`
-            })
-          );
-        }
+        snapshot = yield* publishWorkspaceHeadIfNeeded(snapshot, headSha);
 
         // Refresh remote refs and decide whether the workspace needs to rebase.
         yield* fetchWorkspaceCoordinationRefs(
@@ -134,161 +351,14 @@ export function makeWorkspaceSupervisors(
           options.config.coordinationRemote,
           options.syncBranch
         );
-
-        if (snapshot.state.lastRebasedOntoSha !== signal.syncTargetSha) {
-          const dirty = yield* workspaceWorkingTreeDirty(options.provider, snapshot);
-
-          if (dirty) {
-            snapshot = withState(
-              snapshot,
-              AwaitingRebaseState.make({
-                ...trackingFields(snapshot),
-                requiredTarget: signal.syncTargetSha,
-                detail: `Workspace must rebase onto ${signal.syncTargetSha.slice(0, 8)}`
-              })
-            );
-            yield* persistSnapshot(snapshot);
-            yield* options.eventJournal.append(
-              WorkspaceRebaseAwaiting.make({
-                timestamp: isoNow(),
-                agentId: snapshot.agentId,
-                branch: snapshot.spec.coordinationBranch,
-                target: signal.syncTargetSha,
-                summary: `${snapshot.agentId} is waiting for a clean rebase`
-              })
-            );
-            return;
-          }
-
-          if (inspected.phase === "running") {
-            // Rebase only from a stopped checkout so agent work and git history are never
-            // mutated concurrently inside the same workspace.
-            yield* options.provider.interruptIteration(snapshot);
-            yield* persistSnapshot(
-              withState(snapshot, RestartPendingState.make(trackingFields(snapshot)))
-            );
-            return;
-          }
-
-          const rebasedSha = yield* rebaseWorkspaceOntoSyncTarget(
-            options.provider,
-            snapshot,
-            options.config.coordinationRemote,
-            options.syncBranch,
-            signal.syncTargetSha
-          ).pipe(
-            Effect.catchTag("RebaseConflictError", (error) =>
-              persistSnapshot(
-                withState(
-                  snapshot,
-                  RebaseConflictState.make({
-                    ...trackingFields(snapshot),
-                    requiredTarget: signal.syncTargetSha,
-                    detail: error.detail
-                  })
-                )
-              ).pipe(
-                Effect.zipRight(
-                  options.eventJournal.append(
-                    WorkspaceRebaseFailed.make({
-                      timestamp: isoNow(),
-                      agentId: snapshot.agentId,
-                      branch: snapshot.spec.coordinationBranch,
-                      target: signal.syncTargetSha,
-                      detail: error.detail,
-                      summary: `${snapshot.agentId} hit a rebase conflict`
-                    })
-                  )
-                ),
-                Effect.as(null)
-              )
-            )
-          );
-          if (rebasedSha === null) {
-            return;
-          }
-
-          snapshot = withState(
-            snapshot,
-            RestartPendingState.make({
-              ...trackingFields(snapshot),
-              lastCommitSha: rebasedSha,
-              lastRebasedOntoSha: signal.syncTargetSha
-            })
-          );
-          yield* persistSnapshot(snapshot);
-          yield* options.eventJournal.append(
-            WorkspaceRebased.make({
-              timestamp: isoNow(),
-              agentId: snapshot.agentId,
-              branch: snapshot.spec.coordinationBranch,
-              target: signal.syncTargetSha,
-              summary: `${snapshot.agentId} rebased onto ${signal.syncTargetSha.slice(0, 8)}`
-            })
-          );
-        }
-
-        // Restart the workspace whenever the current iteration has ended or a rebase completed.
-        if (inspected.phase === "running") {
+        const rebasedSnapshot = yield* rebaseWorkspaceIfNeeded(snapshot, signal, inspected);
+        if (rebasedSnapshot === null) {
           return;
         }
+        snapshot = rebasedSnapshot;
 
-        if (inspected.phase === "exited" && initial.state._tag === "Running") {
-          snapshot = withState(
-            snapshot,
-            RestartPendingState.make({
-              ...trackingFields(snapshot),
-              lastExitCode: inspected.exitCode,
-              lastExitedAt: isoNow()
-            })
-          );
-          yield* persistSnapshot(snapshot);
-          yield* options.eventJournal.append(
-            IterationExited.make({
-              timestamp: isoNow(),
-              agentId: snapshot.agentId,
-              branch: snapshot.spec.coordinationBranch,
-              exitCode: inspected.exitCode,
-              summary: `${snapshot.agentId} iteration exited`
-            })
-          );
-        }
-
-        const sessionId = yield* options.provider.startIteration(snapshot);
-        const nextIteration = snapshot.state.iteration + 1;
-        const startedAt = isoNow();
-        const restarted = nextIteration > 1 || inspected.phase === "exited";
-
-        snapshot = withState(
-          snapshot,
-          RunningState.make({
-            ...trackingFields(snapshot),
-            iteration: nextIteration,
-            sessionId,
-            startedAt
-          })
-        );
-        yield* persistSnapshot(snapshot);
-
-        if (restarted) {
-          yield* options.eventJournal.append(
-            WorkspaceRestarted.make({
-              timestamp: startedAt,
-              agentId: snapshot.agentId,
-              branch: snapshot.spec.coordinationBranch,
-              summary: `Restarted ${snapshot.agentId}`
-            })
-          );
-        }
-
-        yield* options.eventJournal.append(
-          IterationStarted.make({
-            timestamp: startedAt,
-            agentId: snapshot.agentId,
-            branch: snapshot.spec.coordinationBranch,
-            summary: `Started iteration ${nextIteration} for ${snapshot.agentId}`
-          })
-        );
+        snapshot = yield* recordIterationExit(initial, snapshot, inspected);
+        yield* startNextIteration(snapshot, inspected);
       });
 
     /** Consume queued reconcile signals for one workspace until the daemon stops. */

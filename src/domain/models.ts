@@ -217,6 +217,7 @@ const EventWithWorkspaceFields = {
   branch: BranchName
 } as const;
 
+// Workspace lifecycle events.
 /** Event emitted when a new workspace has been provisioned and registered. */
 export class WorkspaceProvisioned extends Schema.TaggedClass<WorkspaceProvisioned>()(
   "WorkspaceProvisioned",
@@ -241,6 +242,7 @@ export class WorkspaceRestarted extends Schema.TaggedClass<WorkspaceRestarted>()
   EventWithWorkspaceFields
 ) {}
 
+// Daemon lifecycle events.
 /** Event emitted when the daemon process finishes startup. */
 export class DaemonStarted extends Schema.TaggedClass<DaemonStarted>()(
   "DaemonStarted",
@@ -253,6 +255,7 @@ export class DaemonStopped extends Schema.TaggedClass<DaemonStopped>()(
   EventBaseFields
 ) {}
 
+// Synchronization and promotion events.
 /** Event emitted when a workspace HEAD is published to its coordination branch. */
 export class BranchPublished extends Schema.TaggedClass<BranchPublished>()("BranchPublished", {
   ...EventWithWorkspaceFields,

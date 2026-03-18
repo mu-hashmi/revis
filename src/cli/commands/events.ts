@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import type { ProjectAppServices } from "../../app/project-layer";
 import { DaemonControl } from "../../daemon/control";
 import { ValidationError } from "../../domain/errors";
-import { RuntimeEventSchema } from "../../domain/models";
+import { RuntimeEventSchema, type RuntimeEvent } from "../../domain/models";
 import { EventJournal } from "../../services/event-journal";
 import { reportErrors, withProject, writeLine, type CliWriters } from "../runtime";
 
@@ -24,51 +24,7 @@ export function makeEventsCommand(io: CliWriters) {
     const state = yield* daemon.ensureRunning;
 
     yield* Effect.tryPromise({
-      try: async (signal) => {
-        // Connect to the daemon-owned event stream.
-        const response = await fetch(`${state.apiBaseUrl}/api/events/stream`, {
-          cache: "no-store",
-          signal
-        });
-        if (!response.ok || !response.body) {
-          throw new Error(await response.text());
-        }
-
-        const decoder = new TextDecoder();
-        const reader = response.body.getReader();
-        let buffer = "";
-
-        while (true) {
-          // Buffer fetch chunks until a full SSE frame is available.
-          const { done, value } = await reader.read();
-          if (done) {
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-
-          while (true) {
-            // SSE frames are delimited by a blank line, and fetch chunk boundaries are arbitrary.
-            const marker = buffer.indexOf("\n\n");
-            if (marker === -1) {
-              break;
-            }
-
-            const frame = buffer.slice(0, marker);
-            buffer = buffer.slice(marker + 2);
-
-            // Parse each data line into the runtime event payload the CLI renders.
-            for (const line of frame.split("\n")) {
-              if (!line.startsWith("data: ")) {
-                continue;
-              }
-
-              const event = Schema.decodeUnknownSync(RuntimeEventSchema)(JSON.parse(line.slice(6)));
-              writeOut(`${event.timestamp} ${event.summary}\n`);
-            }
-          }
-        }
-      },
+      try: (signal) => followEventStream(`${state.apiBaseUrl}/api/events/stream`, writeOut, signal),
       catch: (error) =>
         ValidationError.make({
           message: error instanceof Error ? error.message : String(error)
@@ -95,4 +51,67 @@ export function makeEventsCommand(io: CliWriters) {
       writeErr
     )
   ).pipe(Command.withDescription("Show or follow the runtime event stream."));
+}
+
+/** Stream daemon-owned SSE events and render each runtime event as one CLI line. */
+async function followEventStream(
+  url: string,
+  writeOut: (text: string) => void,
+  signal: AbortSignal
+): Promise<void> {
+  // Connect to the daemon-owned event stream.
+  const response = await fetch(url, {
+    cache: "no-store",
+    signal
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(await response.text());
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+
+  while (true) {
+    // Buffer fetch chunks until a full SSE frame is available.
+    const { done, value } = await reader.read();
+    if (done) {
+      return;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    buffer = flushSseFrames(buffer, writeOut);
+  }
+}
+
+/** Flush every complete SSE frame from the buffered text and return the remainder. */
+function flushSseFrames(buffer: string, writeOut: (text: string) => void): string {
+  while (true) {
+    // SSE frames are delimited by a blank line, and fetch chunk boundaries are arbitrary.
+    const marker = buffer.indexOf("\n\n");
+    if (marker === -1) {
+      return buffer;
+    }
+
+    const frame = buffer.slice(0, marker);
+    buffer = buffer.slice(marker + 2);
+    renderSseFrame(frame, writeOut);
+  }
+}
+
+/** Render every runtime event carried by one parsed SSE frame. */
+function renderSseFrame(frame: string, writeOut: (text: string) => void): void {
+  for (const line of frame.split("\n")) {
+    if (!line.startsWith("data: ")) {
+      continue;
+    }
+
+    const event = Schema.decodeUnknownSync(RuntimeEventSchema)(JSON.parse(line.slice(6)));
+    writeOut(renderEventLine(event));
+  }
+}
+
+/** Render one runtime event in the CLI stream format. */
+function renderEventLine(event: RuntimeEvent): string {
+  return `${event.timestamp} ${event.summary}\n`;
 }

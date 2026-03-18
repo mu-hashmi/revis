@@ -72,16 +72,27 @@ export const promotionServiceLayer = Layer.effect(
       // and pull-request flows operate on the same remote-visible branch state.
       yield* pushWorkspaceHead(provider, snapshot, config.coordinationRemote);
 
-      const result = usesManagedTrunk(config.coordinationRemote)
-        ? yield* promoteManagedWorkspace(paths.root, config, snapshot, hostGit, executor, fs, path)
-        : yield* promotePullRequestWorkspace(
-            paths.root,
-            config,
-            snapshot,
-            hostGit,
-            provider,
-            executor
-          );
+      let result: PromotionResult;
+      if (usesManagedTrunk(config.coordinationRemote)) {
+        result = yield* promoteManagedWorkspace(
+          paths.root,
+          config,
+          snapshot,
+          hostGit,
+          executor,
+          fs,
+          path
+        );
+      } else {
+        result = yield* promotePullRequestWorkspace(
+          paths.root,
+          config,
+          snapshot,
+          hostGit,
+          provider,
+          executor
+        );
+      }
 
       yield* eventJournal.append(
         Promoted.make({

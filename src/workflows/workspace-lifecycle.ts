@@ -40,56 +40,59 @@ export function createWorkspaces(count: number, execCommand: string) {
       : yield* hostGit.remoteUrl(projectRoot, config.coordinationRemote);
     const existing = yield* store.list;
 
+    /** Provision, persist, and announce one new workspace. */
+    const createWorkspace = (agentId: ReturnType<typeof asAgentId>) =>
+      Effect.gen(function* () {
+        const coordinationBranch = workspaceBranch(operatorSlug, agentId);
+        const provisioned = yield* provider.provision({
+          root: projectRoot,
+          remoteName: config.coordinationRemote,
+          remoteUrl,
+          syncBranch,
+          operatorSlug,
+          agentId,
+          coordinationBranch,
+          execCommand
+        });
+        const createdAt = isoNow();
+        const snapshot = WorkspaceSnapshot.make({
+          spec: WorkspaceSpec.make({
+            agentId,
+            operatorSlug,
+            coordinationBranch,
+            localBranch: provisioned.localBranch,
+            workspaceRoot: provisioned.workspaceRoot,
+            execCommand,
+            sandboxProvider: config.sandboxProvider,
+            createdAt,
+            attachCmd: provisioned.attachCmd ? [...provisioned.attachCmd] : undefined,
+            attachLabel: provisioned.attachLabel,
+            sandboxId: provisioned.sandboxId
+          }),
+          state: RestartPendingState.make({
+            iteration: 0,
+            lastCommitSha: provisioned.head,
+            lastRebasedOntoSha: provisioned.head
+          })
+        });
+
+        yield* store.upsert(snapshot);
+        yield* journal.append(
+          WorkspaceProvisioned.make({
+            timestamp: createdAt,
+            agentId,
+            branch: coordinationBranch,
+            summary: `Provisioned ${agentId}`
+          })
+        );
+
+        return snapshot;
+      });
+
     // Allocate agent ids first, then provision each workspace in parallel.
     return yield* Effect.forEach(
       allocateAgentIds(existing, count),
-      (agentId) =>
-        Effect.gen(function* () {
-          const coordinationBranch = workspaceBranch(operatorSlug, agentId);
-          const provisioned = yield* provider.provision({
-            root: projectRoot,
-            remoteName: config.coordinationRemote,
-            remoteUrl,
-            syncBranch,
-            operatorSlug,
-            agentId,
-            coordinationBranch,
-            execCommand
-          });
-          const createdAt = isoNow();
-          const snapshot = WorkspaceSnapshot.make({
-            spec: WorkspaceSpec.make({
-              agentId,
-              operatorSlug,
-              coordinationBranch,
-              localBranch: provisioned.localBranch,
-              workspaceRoot: provisioned.workspaceRoot,
-              execCommand,
-              sandboxProvider: config.sandboxProvider,
-              createdAt,
-              attachCmd: provisioned.attachCmd ? [...provisioned.attachCmd] : undefined,
-              attachLabel: provisioned.attachLabel,
-              sandboxId: provisioned.sandboxId
-            }),
-            state: RestartPendingState.make({
-              iteration: 0,
-              lastCommitSha: provisioned.head,
-              lastRebasedOntoSha: provisioned.head
-            })
-          });
-
-          yield* store.upsert(snapshot);
-          yield* journal.append(
-            WorkspaceProvisioned.make({
-              timestamp: createdAt,
-              agentId,
-              branch: coordinationBranch,
-              summary: `Provisioned ${agentId}`
-            })
-          );
-
-          return snapshot;
-        }),
+      createWorkspace,
       { concurrency: "unbounded" }
     );
   });
@@ -102,27 +105,26 @@ export function stopWorkspace(agentId: string) {
     const provider = yield* WorkspaceProvider;
     const store = yield* WorkspaceStore;
     const snapshot = yield* store.get(agentId);
+    if (Option.isNone(snapshot)) {
+      return null;
+    }
 
-    return yield* Option.match(snapshot, {
-      onNone: () => Effect.succeed(null),
-      onSome: (current) =>
-        Effect.gen(function* () {
-          // Remove the runtime first so the persisted store and the operator-facing event agree on
-          // the workspace no longer existing.
-          yield* provider.destroyWorkspace(current);
-          yield* store.remove(current.agentId);
-          yield* journal.append(
-            WorkspaceStopped.make({
-              timestamp: isoNow(),
-              agentId: current.agentId,
-              branch: current.spec.coordinationBranch,
-              summary: `Stopped ${current.agentId}`
-            })
-          );
+    const current = snapshot.value;
 
-          return current;
-        })
-    });
+    // Remove the runtime first so the persisted store and the operator-facing event agree on
+    // the workspace no longer existing.
+    yield* provider.destroyWorkspace(current);
+    yield* store.remove(current.agentId);
+    yield* journal.append(
+      WorkspaceStopped.make({
+        timestamp: isoNow(),
+        agentId: current.agentId,
+        branch: current.spec.coordinationBranch,
+        summary: `Stopped ${current.agentId}`
+      })
+    );
+
+    return current;
   });
 }
 

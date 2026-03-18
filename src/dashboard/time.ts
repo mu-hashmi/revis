@@ -28,7 +28,7 @@ export function formatElapsed(minutes: number): string {
 }
 
 /** Choose a dense but readable tick interval for the current zoom level. */
-export function chooseTickMinutes(totalMinutes: number, pxPerMinute: number): number {
+export function chooseTickMinutes(pxPerMinute: number): number {
   const targetPx = 78;
   const candidates = [1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120];
 

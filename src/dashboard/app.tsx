@@ -67,6 +67,7 @@ interface DashboardDataState {
 interface TimelineModel {
   activeEvent: TimelineEvent | null;
   commitCount: number;
+  eventsByAgent: ReadonlyMap<string, TimelineEvent[]>;
   filteredEvents: TimelineEvent[];
   iterationCount: number;
   laneAgents: string[];
@@ -416,9 +417,7 @@ export function DashboardApp(): React.JSX.Element {
                   </svg>
 
                   {timeline.visibleAgents.map((agentId, laneIndex) => {
-                    const agentEvents = timeline.filteredEvents.filter(
-                      (event) => event.agentId === agentId
-                    );
+                    const agentEvents = timeline.eventsByAgent.get(agentId) ?? [];
                     return (
                       <div className="timeline-lane" key={agentId}>
                         <div
@@ -528,9 +527,7 @@ function useDashboardData(): DashboardDataState {
 
   useEffect(() => {
     if (!selectedSessionId) {
-      setSessionMeta(null);
-      setEvents([]);
-      setLoading(false);
+      clearSelectedSessionFrame(setSessionMeta, setEvents, setLoading);
       return;
     }
 
@@ -541,10 +538,7 @@ function useDashboardData(): DashboardDataState {
     /** Load the selected session metadata plus its archived event backlog. */
     const load = async (): Promise<void> => {
       try {
-        const [nextMeta, nextEvents] = await Promise.all([
-          fetchSessionMeta(selectedSessionId),
-          fetchSessionEvents(selectedSessionId)
-        ]);
+        const { meta: nextMeta, events: nextEvents } = await loadSelectedSessionFrame(selectedSessionId);
         if (!active) {
           return;
         }
@@ -671,6 +665,25 @@ function useCommitLookup(selectedCommitSha: string | undefined): {
   };
 }
 
+/** Clear the dashboard frame when no session is currently selected. */
+function clearSelectedSessionFrame(
+  setSessionMeta: React.Dispatch<React.SetStateAction<SessionMeta | null>>,
+  setEvents: React.Dispatch<React.SetStateAction<RuntimeEvent[]>>,
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>
+): void {
+  setSessionMeta(null);
+  setEvents([]);
+  setLoading(false);
+}
+
+/** Load one selected session's metadata and archived event backlog together. */
+async function loadSelectedSessionFrame(
+  sessionId: string
+): Promise<{ meta: SessionMeta; events: RuntimeEvent[] }> {
+  const [meta, events] = await Promise.all([fetchSessionMeta(sessionId), fetchSessionEvents(sessionId)]);
+  return { meta, events };
+}
+
 /** Build the filtered timeline model used by the dashboard render tree. */
 function useTimelineModel(
   sessionMeta: SessionMeta | null,
@@ -709,60 +722,28 @@ function useTimelineModel(
 
   // Filter the normalized event list down to the currently visible lanes, event kinds, and range.
   const filteredEvents = useMemo(
-    () =>
-      normalizedEvents.filter((event) => {
-        if (!selectedTypes.has(event.kind)) {
-          return false;
-        }
-
-        if (event.agentId && !selectedAgents.has(event.agentId)) {
-          return false;
-        }
-
-        return event.minutes >= timeRange[0] && event.minutes <= timeRange[1];
-      }),
+    () => filterTimelineEvents(normalizedEvents, selectedAgents, selectedTypes, timeRange),
     [normalizedEvents, selectedAgents, selectedTypes, timeRange]
   );
+  const eventsByAgent = useMemo(() => groupTimelineEventsByAgent(filteredEvents), [filteredEvents]);
 
   // Count only the currently visible events so sidebar filters track the active viewport.
   const visibleCounts = useMemo(
-    () =>
-      normalizedEvents.reduce<TimelineCounts>(
-        (counts, event) => {
-          if (event.agentId && !selectedAgents.has(event.agentId)) {
-            return counts;
-          }
-
-          if (event.minutes < timeRange[0] || event.minutes > timeRange[1]) {
-            return counts;
-          }
-
-          counts[event.kind] += 1;
-          return counts;
-        },
-        {
-          commit: 0,
-          iteration: 0,
-          system: 0
-        }
-      ),
+    () => countVisibleTimelineEvents(normalizedEvents, selectedAgents, timeRange),
     [normalizedEvents, selectedAgents, timeRange]
   );
 
   // Prefer explicit selection over hover state when deciding which event to show in detail.
-  const activeEvent =
-    filteredEvents.find((event) => event.key === selectedEventKey) ??
-    filteredEvents.find((event) => event.key === hoveredEventKey) ??
-    null;
-  const commitCount = filteredEvents.filter((event) => event.kind === "commit").length;
-  const iterationCount = filteredEvents.filter((event) => event.kind === "iteration").length;
-  const systemCount = filteredEvents.filter((event) => event.kind === "system").length;
-  const tickMinutes = chooseTickMinutes(timeRange[1] - timeRange[0], PX_PER_MINUTE);
+  const activeEvent = resolveActiveTimelineEvent(filteredEvents, selectedEventKey, hoveredEventKey);
+  const { commit: commitCount, iteration: iterationCount, system: systemCount } =
+    countTimelineKinds(filteredEvents);
+  const tickMinutes = chooseTickMinutes(PX_PER_MINUTE);
   const timelineWidth = Math.max((timeRange[1] - timeRange[0]) * PX_PER_MINUTE, 760);
 
   return {
     activeEvent,
     commitCount,
+    eventsByAgent,
     filteredEvents,
     iterationCount,
     laneAgents,
@@ -776,6 +757,104 @@ function useTimelineModel(
     visibleAgents,
     visibleCounts
   };
+}
+
+/** Filter normalized timeline nodes down to the active viewport and filter state. */
+function filterTimelineEvents(
+  events: TimelineEvent[],
+  selectedAgents: Set<string>,
+  selectedTypes: Set<TimelineKind>,
+  timeRange: [number, number]
+): TimelineEvent[] {
+  return events.filter((event) => {
+    if (!selectedTypes.has(event.kind)) {
+      return false;
+    }
+
+    if (event.agentId && !selectedAgents.has(event.agentId)) {
+      return false;
+    }
+
+    return event.minutes >= timeRange[0] && event.minutes <= timeRange[1];
+  });
+}
+
+/** Group visible timeline nodes by agent lane for render-time lookup. */
+function groupTimelineEventsByAgent(
+  events: TimelineEvent[]
+): ReadonlyMap<string, TimelineEvent[]> {
+  const grouped = new Map<string, TimelineEvent[]>();
+
+  for (const event of events) {
+    if (!event.agentId) {
+      continue;
+    }
+
+    const current = grouped.get(event.agentId);
+    if (current) {
+      current.push(event);
+      continue;
+    }
+
+    grouped.set(event.agentId, [event]);
+  }
+
+  return grouped;
+}
+
+/** Count visible timeline nodes by kind for the sidebar filter chips. */
+function countVisibleTimelineEvents(
+  events: TimelineEvent[],
+  selectedAgents: Set<string>,
+  timeRange: [number, number]
+): TimelineCounts {
+  return events.reduce<TimelineCounts>(
+    (counts, event) => {
+      if (event.agentId && !selectedAgents.has(event.agentId)) {
+        return counts;
+      }
+
+      if (event.minutes < timeRange[0] || event.minutes > timeRange[1]) {
+        return counts;
+      }
+
+      counts[event.kind] += 1;
+      return counts;
+    },
+    {
+      commit: 0,
+      iteration: 0,
+      system: 0
+    }
+  );
+}
+
+/** Prefer explicit selection over hover state when choosing the detail panel event. */
+function resolveActiveTimelineEvent(
+  events: TimelineEvent[],
+  selectedEventKey: string | null,
+  hoveredEventKey: string | null
+): TimelineEvent | null {
+  return (
+    events.find((event) => event.key === selectedEventKey) ??
+    events.find((event) => event.key === hoveredEventKey) ??
+    null
+  );
+}
+
+/** Count the visible timeline nodes by display kind. */
+function countTimelineKinds(events: TimelineEvent[]): TimelineCounts {
+  return events.reduce<TimelineCounts>(
+    (counts, event) => {
+      counts[event.kind] += 1;
+      return counts;
+    },
+    {
+      commit: 0,
+      iteration: 0,
+      system: 0
+    }
+  );
 }
 
 /** Toggle one string member inside a Set-backed React state value. */

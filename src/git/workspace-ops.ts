@@ -8,7 +8,7 @@ import {
   WorkspaceCommandError
 } from "../domain/errors";
 import { asRevision, type Revision, type WorkspaceSnapshot } from "../domain/models";
-import type { CommandFailure } from "../platform/process";
+import type { CommandFailure, CompletedCommand } from "../platform/process";
 import type { WorkspaceProviderApi } from "../providers/contract";
 
 export type WorkspaceGitError =
@@ -22,24 +22,18 @@ export function workspaceCurrentBranch(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot
 ) {
-  return provider
-    .runInWorkspace(snapshot, ["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-      check: false
-    })
-    .pipe(
-      Effect.flatMap((result) => {
-        const branch = result.stdout.trim();
-        if (result.exitCode === 0 && branch && branch !== "HEAD") {
-          return Effect.succeed(branch);
-        }
+  return runWorkspaceProbe(provider, snapshot, ["git", "rev-parse", "--abbrev-ref", "HEAD"]).pipe(
+    Effect.flatMap((result) => {
+      const branch = result.stdout.trim();
+      if (branch && branch !== "HEAD") {
+        return Effect.succeed(branch);
+      }
 
-        return Effect.fail(
-          ValidationError.make({
-            message: result.stderr.trim() || result.stdout.trim() || "git branch probe failed"
-          })
-        );
-      })
-    );
+      return ValidationError.make({
+        message: result.stderr.trim() || result.stdout.trim() || "git branch probe failed"
+      });
+    })
+  );
 }
 
 /** Return the current HEAD SHA for one workspace. */
@@ -47,16 +41,8 @@ export function workspaceHeadSha(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot
 ) {
-  return provider.runInWorkspace(snapshot, ["git", "rev-parse", "HEAD"], { check: false }).pipe(
-    Effect.flatMap((result) =>
-      result.exitCode === 0
-        ? Effect.succeed(asRevision(result.stdout.trim()))
-        : Effect.fail(
-            ValidationError.make({
-              message: result.stderr.trim() || result.stdout.trim() || "git rev-parse failed"
-            })
-          )
-    )
+  return runWorkspaceProbe(provider, snapshot, ["git", "rev-parse", "HEAD"]).pipe(
+    Effect.map((result) => asRevision(result.stdout.trim()))
   );
 }
 
@@ -65,19 +51,9 @@ export function workspaceHeadSubject(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot
 ) {
-  return provider
-    .runInWorkspace(snapshot, ["git", "log", "-1", "--pretty=%s", "HEAD"], { check: false })
-    .pipe(
-      Effect.flatMap((result) =>
-        result.exitCode === 0
-          ? Effect.succeed(result.stdout.trim())
-          : Effect.fail(
-              ValidationError.make({
-                message: result.stderr.trim() || result.stdout.trim() || "git log failed"
-              })
-            )
-      )
-    );
+  return runWorkspaceProbe(provider, snapshot, ["git", "log", "-1", "--pretty=%s", "HEAD"]).pipe(
+    Effect.map((result) => result.stdout.trim())
+  );
 }
 
 /** Return whether the workspace working tree has uncommitted changes. */
@@ -85,16 +61,8 @@ export function workspaceWorkingTreeDirty(
   provider: WorkspaceProviderApi,
   snapshot: WorkspaceSnapshot
 ) {
-  return provider.runInWorkspace(snapshot, ["git", "status", "--porcelain"], { check: false }).pipe(
-    Effect.flatMap((result) =>
-      result.exitCode === 0
-        ? Effect.succeed(result.stdout.trim().length > 0)
-        : Effect.fail(
-            ValidationError.make({
-              message: result.stderr.trim() || result.stdout.trim() || "git status failed"
-            })
-          )
-    )
+  return runWorkspaceProbe(provider, snapshot, ["git", "status", "--porcelain"]).pipe(
+    Effect.map((result) => result.stdout.trim().length > 0)
   );
 }
 
@@ -188,19 +156,48 @@ export function workspaceCommitCountSinceRef(
   snapshot: WorkspaceSnapshot,
   baseRef: string
 ): Effect.Effect<number, CommandFailure | ValidationError | WorkspaceCommandError> {
-  return provider
-    .runInWorkspace(snapshot, ["git", "rev-list", "--count", `${baseRef}..HEAD`], {
-      check: false
-    })
-    .pipe(
-      Effect.flatMap((result) =>
-        result.exitCode === 0
-          ? Effect.succeed(Number.parseInt(result.stdout.trim(), 10))
-          : Effect.fail(
-              ValidationError.make({
-                message: result.stderr.trim() || result.stdout.trim() || "git rev-list failed"
-              })
-            )
-      )
-    );
+  return runWorkspaceProbe(provider, snapshot, ["git", "rev-list", "--count", `${baseRef}..HEAD`]).pipe(
+    Effect.map((result) => Number.parseInt(result.stdout.trim(), 10))
+  );
+}
+
+/** Run one git probe inside the workspace and require a successful exit status. */
+function runWorkspaceProbe(
+  provider: WorkspaceProviderApi,
+  snapshot: WorkspaceSnapshot,
+  argv: ReadonlyArray<string>
+): Effect.Effect<CompletedCommand, CommandFailure | ValidationError | WorkspaceCommandError> {
+  return provider.runInWorkspace(snapshot, argv, { check: false }).pipe(
+    Effect.flatMap((result) => requireSuccessfulProbe(result, probeFailureMessage(argv[1] ?? "git")))
+  );
+}
+
+/** Turn a non-zero git probe result into a loud validation failure. */
+function requireSuccessfulProbe(
+  result: CompletedCommand,
+  fallbackMessage: string
+): Effect.Effect<CompletedCommand, ValidationError> {
+  if (result.exitCode === 0) {
+    return Effect.succeed(result);
+  }
+
+  return ValidationError.make({
+    message: result.stderr.trim() || result.stdout.trim() || fallbackMessage
+  });
+}
+
+/** Return the operator-facing fallback message for a workspace git probe. */
+function probeFailureMessage(command: string): string {
+  switch (command) {
+    case "rev-parse":
+      return "git rev-parse failed";
+    case "log":
+      return "git log failed";
+    case "status":
+      return "git status failed";
+    case "rev-list":
+      return "git rev-list failed";
+    default:
+      return "git command failed";
+  }
 }
