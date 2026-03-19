@@ -8,7 +8,8 @@ This repository is a VERY EARLY WIP. Proposing sweeping changes that improve lon
 
 ## MANDATORY Rules
 
-- NEVER change wording in README.md unless explicitly requested. You may only update the installation/usage/requirements if those change. If the product/functionality/behavior ever changes such that the README (or any docs) are now obsolete, surface this immediately. 
+- NEVER change wording in README.md unless explicitly requested. You may only update the installation/usage/requirements if those change. If the product/functionality/behavior ever changes such that the README (or any docs) are now obsolete, surface this immediately.
+- ALL typescript must be written in effect-ts. See below for best practices and conventions.
 
 ## Effect Best Practices
 

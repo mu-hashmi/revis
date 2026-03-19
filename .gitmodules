@@ -7,3 +7,6 @@
 [submodule ".reference/dfx"]
 	path = .reference/dfx
 	url = https://github.com/tim-smart/dfx.git
+[submodule ".reference/sandbox-agent"]
+	path = .reference/sandbox-agent
+	url = https://github.com/rivet-dev/sandbox-agent

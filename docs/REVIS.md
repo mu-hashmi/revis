@@ -2,84 +2,79 @@
 
 ## Coordination loop
 
-Revis does 3 things:
+Revis now does 3 things:
 
-1. It provisions isolated workspaces with stable coordination refs like `revis/alice/agent-3/work`.
-2. It runs a background daemon that reconciles workspaces in parallel, pushes owned refs, fetches everyone else's `revis/*` refs, and rebases before the next iteration starts.
-3. It promotes one chosen workspace into managed trunk or into a pull request.
+1. It provisions one isolated branch and workspace per participant.
+2. It starts one Sandbox Agent SDK session per participant and watches session events in the foreground.
+3. It turns completed turns into short relay prompts for the other participants.
 
 The coordination loop looks like this:
 
 ```text
-┌────────────────────────┐   exit detected   ┌──────────────────────┐   push / fetch    ┌─────────────────────────┐
-│ workspace repo         │ ───────────────►  │ revis daemon         │ ◄──────────────►  │ revis/*/agent-*/work    │
-│ detached agent session │ ◄──── restart ─── │ Effect runtime       │ ── rebase sync ─► │ remote coordination refs│
-└────────────────────────┘                   └──────────────────────┘                   └─────────────────────────┘
+┌──────────────────────┐   session events   ┌──────────────────────┐   prompt relays   ┌──────────────────────┐
+│ participant sandbox  │ ─────────────────► │ revis coordinator    │ ─────────────────► │ other participant    │
+│ git repo + agent run │ ◄───────────────── │ foreground process   │ ◄───────────────── │ sandboxes + sessions │
+└──────────────────────┘    sdk prompts     └──────────────────────┘    idle session    └──────────────────────┘
 ```
 
-Each workspace snapshot tracks the last observed local head and last rebased sync target, so reconciles only act on new local or remote state. Each workspace then runs in iterations:
+Each participant starts with the shared task prompt. When a prompt completes, Revis:
 
-- starts the workspace command from `revis spawn --exec '<command>'`
-- waits for that bounded session to exit
-- pushes the workspace `HEAD` to `revis/<operator>/agent-<n>/work`
-- fetches remote `revis/*/agent-*/work` refs
-- rebases the workspace onto the current sync target before the next iteration starts
-- blocks restart when the workspace is dirty or the rebase conflicts
+- reads the new session events
+- extracts the latest assistant output
+- inspects the participant workspace for changed files
+- pushes the participant branch if `HEAD` moved
+- sends a short relay prompt to every other participant
 
-Workspace reconciliation runs in parallel fibers, so the daemon can supervise every workspace concurrently without a hand-rolled queue.
+Permissions are auto-approved through the SDK so unattended runs do not stall. Questions are treated as blocking state and surfaced in run status instead of being auto-answered.
 
-For local `revis-local` coordination, that sync target is `revis/trunk`. For a real shared remote, it is the configured base branch.
+There is no background daemon, no git-ref reconcile loop, and no branch rebasing between participants.
 
 ## Branch model
 
-Each workspace has two branch concepts:
+Each participant gets one stable branch:
 
-- the stable coordination ref owned by Revis: `revis/<operator>/agent-<n>/work`
-- the workspace repo's current local branch, which the agent may change freely
-
-Revis always publishes the workspace's current `HEAD` to the stable coordination ref. That keeps coordination stable without forcing repo-specific branch naming.
+- `revis/<operator>/<run-id>/agent-<n>`
 
 The operator slug comes from local git identity:
 
-- first `git config user.email` local-part
-- then `git config user.name`
+- first `git config user.name`
+- then `USER` / `USERNAME`
 - slugified to lowercase alphanumeric and hyphen
 
-That lets multiple operators share one remote without colliding.
+Participants work directly on their own branch. Git is still used for normal repo work, branch isolation, and PR promotion, but it is no longer the transport for coordination.
 
 ## Promotion
 
 `revis promote <agent-id>` is operator-only.
 
-Before promotion, Revis pushes the workspace's current `HEAD` to its stable coordination ref.
+Promotion is remote-first:
 
-- In managed-trunk mode (`revis-local`), Revis merges that coordination ref into `revis/trunk`, then the daemon rebases other tracked workspaces before their next restart.
-- Against a real shared remote, Revis pushes the coordination ref and opens or reuses a GitHub pull request targeting the configured base branch.
+- the participant workspace must be clean
+- Revis pushes the participant branch to the configured remote
+- Revis opens or reuses a GitHub pull request targeting the configured base branch
+
+There is no managed trunk mode and no local `revis-local` coordination remote.
 
 ## Runtime files
 
-Revis keeps its local runtime state under `.revis/`:
+Revis keeps local runtime state under `.revis/`:
 
 ```text
 .revis/
   config.json
-  state/
-    daemon.json
-    workspaces/
-      agent-1.json
-  journal/
-    live.jsonl
-  archive/
-    sessions/
-      sess-1234abcd/
-        meta.json
-        events.jsonl
-  coordination.git/        # only in revis-local mode
-  workspaces/              # local provider only
-    agent-1/
-      repo/
-      session.log
-      session.exit
+  active-run
+  runs/
+    <run-id>/
+      run.json
+      revis-events.jsonl
+      agents/
+        agent-1.json
+      sessions/
+        <session-id>.json
+      events/
+        <session-id>.jsonl
+      worktrees/              # local sandbox only
+        agent-1/
 ```
 
-`config.json`, `state/`, `journal/`, and `archive/` are always local. `coordination.git/` exists only in `revis-local` mode, and `workspaces/` is populated by the local provider. The daemon appends every runtime event to the live journal and, when a live session exists, mirrors the same events into that session archive. `revis init` adds the state, journal, archive, workspace, and coordination remote paths to `.gitignore`.
+`config.json` stores repo defaults. `active-run` points at the current run. Each run keeps its own participant state, SDK session persistence, and high-level Revis event log. Local sandboxes also keep git worktrees under the run directory.

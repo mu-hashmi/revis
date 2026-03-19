@@ -1,23 +1,15 @@
 #!/usr/bin/env node
 
-/** CLI bin entrypoint for Revis. */
+/** CLI bin entrypoint for the SDK-native Revis runtime. */
 
-import { Command } from "@effect/cli";
-import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
-import * as NodeContext from "@effect/platform-node/NodeContext";
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import { NodeContext, NodeRuntime } from "@effect/platform-node";
+import { Effect } from "effect";
 
-import { buildCli } from "../cli/app";
+import { runCli } from "../revis/cli";
 
-const app = buildCli();
-const run = Command.run(app, {
-  name: "revis",
-  version: "0.1.1"
-});
-
-run(process.argv).pipe(
-  Effect.provide(Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici)),
-  NodeRuntime.runMain
+NodeRuntime.runMain(
+  Effect.provide(
+    runCli(process.argv.slice(2)) as Effect.Effect<void, never, NodeContext.NodeContext>,
+    NodeContext.layer
+  )
 );
