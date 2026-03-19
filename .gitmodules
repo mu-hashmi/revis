@@ -1,0 +1,9 @@
+[submodule ".reference/effect"]
+	path = .reference/effect
+	url = https://github.com/Effect-TS/effect.git
+[submodule ".reference/discord-bot"]
+	path = .reference/discord-bot
+	url = https://github.com/Effect-TS/discord-bot.git
+[submodule ".reference/dfx"]
+	path = .reference/dfx
+	url = https://github.com/tim-smart/dfx.git

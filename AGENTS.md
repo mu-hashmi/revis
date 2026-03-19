@@ -16,10 +16,16 @@ This repository is a VERY EARLY WIP. Proposing sweeping changes that improve lon
 
 1. Read `https://effect.website/llms.txt` to find the relevant official docs pages for the API or pattern you need
 2. Use the linked `effect.website` docs as the primary documentation source
-3. Search `.reference/effect/` for real implementations and exact API behavior; the Effect repo is already cloned locally for reference (if it isn't, clone it there: https://github.com/Effect-TS/effect)
-4. When the Effect docs are ambiguous, verify the current installed API against `node_modules/effect/` before changing code
+3. Search `.reference/effect/` for real implementations and exact API behavior. `.reference/` is backed by git submodules, so if these paths are missing in a fresh clone, run `git submodule update --init --recursive .reference/effect .reference/discord-bot .reference/dfx`
+4. When the Effect docs are ambiguous, verify the current installed API against `node_modules/effect/` before changing code.
 
-Never guess at Effect patterns - check the official docs and local source first.
+Use the monorepo in `.reference/effect/` as the canonical reference. Every package within it (@effect/platform, @effect/sql, @effect/ai, @effect/cli, @effect/cluster) demonstrates idiomatic patterns because the core team wrote them. The @effect/platform package is especially instructive; it shows the full Service → Layer → Runtime pattern across Node/Bun/Browser with proper dependency injection, typed errors, and resource management.
+
+Use `.reference/discord-bot/` as the best small real-world application reference. It shows service boundaries, Layer wiring, runtime setup, and production-style error handling in a deployed Effect app maintained by the core team.
+
+Use `.reference/dfx/` as the library-design reference. It is the idiomatic example for building a framework on top of Effect with clean services, Config usage, registries, and `Effect.gen`-driven APIs.
+
+NEVER guess at Effect patterns - check the official docs and local source first.
 
 ## Code Conventions (IMPORTANT)
 

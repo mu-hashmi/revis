@@ -2,7 +2,10 @@
 dist/
 build/
 node_modules/
-.reference/
+.reference/*
+!.reference/effect
+!.reference/discord-bot
+!.reference/dfx
 
 # Revis runtime state stays local because it only drives monitor/status views.
 .revis/runtime/
