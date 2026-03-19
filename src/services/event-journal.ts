@@ -86,7 +86,7 @@ export const eventJournalLayer = Layer.scoped(
       summaries: [...summaries].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
     });
     const pubsub = yield* Effect.acquireRelease(
-      PubSub.unbounded<RuntimeEvent>(),
+      PubSub.sliding<RuntimeEvent>(64),
       (events) => PubSub.shutdown(events)
     );
 

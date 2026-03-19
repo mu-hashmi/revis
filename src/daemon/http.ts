@@ -1,13 +1,20 @@
 /** HTTP transport, SSE streaming, and daemon-control client helpers. */
 
-import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, relative, resolve } from "node:path";
 
-import { HttpServerResponse } from "@effect/platform";
+import {
+  FileSystem,
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+  HttpServerResponse
+} from "@effect/platform";
+import type * as PlatformFileSystem from "@effect/platform/FileSystem";
+import type * as PlatformHttpClient from "@effect/platform/HttpClient";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import {
@@ -19,6 +26,8 @@ import {
 } from "../domain/errors";
 import { EventJournal } from "../services/event-journal";
 import { DaemonState } from "../domain/models";
+import { postJson } from "../platform/http-client";
+import { readJsonFileIfExists } from "../platform/storage";
 
 /** Bind the daemon HTTP server to an ephemeral localhost port. */
 export function makeDaemonServer() {
@@ -58,16 +67,19 @@ export function streamLiveEvents() {
 
 /** Serve one static dashboard asset from disk. */
 export function respondStaticFile(path: string, contentType: string) {
-  return Effect.tryPromise(() => readFile(path)).pipe(
-    Effect.map((payload) =>
-      HttpServerResponse.uint8Array(payload, {
-        contentType,
-        headers: {
-          "Cache-Control": "no-store"
-        }
-      })
-    )
-  );
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const payload = yield* fs.readFile(path).pipe(
+      Effect.mapError((error) => storageError(path, error.message))
+    );
+
+    return HttpServerResponse.uint8Array(payload, {
+      contentType,
+      headers: {
+        "Cache-Control": "no-store"
+      }
+    });
+  });
 }
 
 /** Resolve one dashboard asset path and reject traversal attempts. */
@@ -104,15 +116,22 @@ export function contentTypeForPath(path: string): string {
 }
 
 /** Return whether one daemon API base URL is responding. */
-export function daemonApiReady(apiBaseUrl: string): Effect.Effect<boolean> {
-  return Effect.tryPromise({
-    try: async (signal) => {
-      const response = await fetch(`${apiBaseUrl}/health`, { cache: "no-store", signal });
-      return response.ok;
-    },
-    catch: (error) =>
-      DaemonUnavailableError.make({ message: error instanceof Error ? error.message : String(error) })
+export function daemonApiReady(
+  apiBaseUrl: string
+): Effect.Effect<boolean, never, PlatformHttpClient.HttpClient> {
+  return HttpClientRequest.get(`${apiBaseUrl}/health`, {
+    headers: {
+      "Cache-Control": "no-store"
+    }
   }).pipe(
+    HttpClient.execute,
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.as(true),
+    Effect.mapError((error) =>
+      DaemonUnavailableError.make({
+        message: error instanceof Error ? error.message : String(error)
+      })
+    ),
     // Readiness probes answer a yes/no question; callers decide whether to retry or clear state.
     Effect.catchAll(() => Effect.succeed(false))
   );
@@ -123,50 +142,72 @@ export function postControl(
   apiBaseUrl: string,
   path: string,
   payload: Record<string, unknown>
-): Effect.Effect<void, CommandError> {
-  return Effect.tryPromise({
-    try: async (signal) => {
-      const response = await fetch(`${apiBaseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload),
-        signal
-      });
+): Effect.Effect<void, CommandError, PlatformHttpClient.HttpClient> {
+  const command = `POST ${path}`;
+
+  return postJson(`${apiBaseUrl}${path}`, payload, (error) =>
+    CommandError.make({
+      command,
+      message: error instanceof Error ? error.message : String(error)
+    })
+  ).pipe(
+    Effect.flatMap((response) => {
+      // Successful control endpoints do not return a meaningful body.
+      if (response.status >= 200 && response.status < 300) {
+        return Effect.void;
+      }
 
       // Bubble the daemon's response body up into the command error so callers can show the
       // transport-level validation failure directly.
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-    },
-    catch: (error) =>
-      CommandError.make({
-        command: `POST ${path}`,
-        message: error instanceof Error ? error.message : String(error)
-      })
-  });
+      return response.text.pipe(
+        Effect.mapError((error) =>
+          CommandError.make({
+            command,
+            message: error instanceof Error ? error.message : String(error)
+          })
+        ),
+        Effect.flatMap((message) =>
+          CommandError.make({
+            command,
+            message
+          })
+        )
+      );
+    })
+  );
 }
 
 /** Wait until the daemon has persisted a ready state and started serving. */
 export function waitForDaemonState(
   daemonStateFile: string,
   timeoutMs: number
-): Effect.Effect<DaemonState, CommandError | StorageError> {
+): Effect.Effect<
+  DaemonState,
+  CommandError | StorageError,
+  PlatformFileSystem.FileSystem | PlatformHttpClient.HttpClient
+> {
   const pollUntilReady = Effect.gen(function* () {
     // Keep disk polling and readiness checks on Effect operators so tests can drive time with
     // TestClock instead of wall-clock loops.
     const daemon = yield* loadDaemonState(daemonStateFile);
-    if (daemon && (yield* daemonApiReady(daemon.apiBaseUrl))) {
+    if (Option.isSome(daemon) && (yield* daemonApiReady(daemon.value.apiBaseUrl))) {
       return daemon;
     }
 
     yield* Effect.sleep("100 millis");
-    return null;
+    return Option.none<DaemonState>();
   }).pipe(
     Effect.repeat({
-      until: (daemon): daemon is DaemonState => daemon !== null
+      until: Option.isSome
+    }),
+    Effect.map((daemon) => {
+      // `Effect.repeat(... until: Option.isSome)` guarantees this branch, but keeping the unwrap
+      // inline makes the steady-state poll read top-to-bottom without an extra helper.
+      if (Option.isNone(daemon)) {
+        throw new Error("Daemon state missing after readiness poll");
+      }
+
+      return daemon.value;
     })
   );
 
@@ -183,51 +224,12 @@ export function waitForDaemonState(
 }
 
 /** Read the persisted daemon state directly from disk so cross-process startup can observe it. */
-function loadDaemonState(path: string): Effect.Effect<DaemonState | null, StorageError> {
-  return readMaybeMissingFile(path).pipe(
-    Effect.flatMap((payload) => {
-      if (payload === null) {
-        return Effect.succeed(null);
-      }
+function loadDaemonState(
+  path: string
+): Effect.Effect<Option.Option<DaemonState>, StorageError, PlatformFileSystem.FileSystem> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
 
-      return decodeDaemonState(path, payload);
-    })
-  );
-}
-
-/** Read one file and treat ENOENT as an expected "not ready yet" state. */
-function readMaybeMissingFile(path: string): Effect.Effect<string | null, StorageError> {
-  return Effect.tryPromise({
-    try: async () => {
-      // Startup races legitimately hit ENOENT before the daemon writes its first ready snapshot.
-      try {
-        return await readFile(path, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          return null;
-        }
-
-        throw storageError(path, error instanceof Error ? error.message : String(error));
-      }
-    },
-    catch: (error) =>
-      typeof error === "object" &&
-      error !== null &&
-      "_tag" in error &&
-      error._tag === "StorageError"
-        ? (error as StorageError)
-        : storageError(path, error instanceof Error ? error.message : String(error))
+    return yield* readJsonFileIfExists(fs, path, DaemonState);
   });
-}
-
-/** Decode one persisted daemon snapshot and surface corruption as `StorageError`. */
-function decodeDaemonState(
-  path: string,
-  payload: string
-): Effect.Effect<DaemonState, StorageError> {
-  return Schema.decodeUnknown(Schema.parseJson(DaemonState))(payload).pipe(
-    // Parse failures mean the daemon wrote an invalid snapshot; surface that as storage
-    // corruption instead of silently retrying forever.
-    Effect.mapError((error) => storageError(path, String(error)))
-  );
 }

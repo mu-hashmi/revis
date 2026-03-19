@@ -89,11 +89,6 @@ export function processAlive(pid: number): boolean {
   }
 }
 
-/** Provide a small Promise sleep for process-management edges outside Effect scopes. */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** Run a short-lived command and capture stdout, stderr, and exit code. */
 export function runCommandWith(
   executor: CommandExecutor.CommandExecutor,

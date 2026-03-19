@@ -3,6 +3,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 
 import * as NodeContext from "@effect/platform-node/NodeContext";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -72,7 +73,7 @@ describe("ProjectConfig", () => {
 
 /** Compose the real project-paths and config services for one temp-root test. */
 function makeProjectConfigLayer(root: string) {
-  const platformLayer = NodeContext.layer;
+  const platformLayer = Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici);
   const pathsLayer = projectPathsLayer(root).pipe(Layer.provide(platformLayer));
   const configLayer = projectConfigLayer.pipe(
     Layer.provide(Layer.merge(platformLayer, pathsLayer))

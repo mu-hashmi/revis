@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import { FileSystem, HttpClient } from "@effect/platform";
 
 import { daemonLayer } from "../app/daemon-layer";
 import {
@@ -78,8 +79,18 @@ export const daemonControlLayer = Layer.effect(
   DaemonControl,
   Effect.gen(function* () {
     const configService = yield* ProjectConfig;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const httpClient = yield* HttpClient.HttpClient;
     const paths = yield* ProjectPaths;
     const store = yield* WorkspaceStore;
+
+    // Capture the platform services once at layer construction time so the exported control API
+    // stays environment-free for CLI callers.
+    const provideTransport = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(HttpClient.HttpClient, httpClient)
+      );
     const spawnDaemon = (timeoutMs: number) =>
       spawnReadyProcess([...currentRevisCommand(), "_daemon-run", "--root", paths.root], {
         cwd: paths.root,
@@ -94,7 +105,10 @@ export const daemonControlLayer = Layer.effect(
     const ensureRunning: Effect.Effect<DaemonState, DaemonControlError> = Effect.gen(function* () {
       const existing = yield* store.daemonState;
 
-      if (Option.isSome(existing) && (yield* daemonApiReady(existing.value.apiBaseUrl))) {
+      if (
+        Option.isSome(existing) &&
+        (yield* provideTransport(daemonApiReady(existing.value.apiBaseUrl)))
+      ) {
         return existing.value;
       }
 
@@ -108,7 +122,7 @@ export const daemonControlLayer = Layer.effect(
       const timeoutMs = daemonStartTimeoutMs(config.sandboxProvider);
 
       yield* spawnDaemon(timeoutMs);
-      return yield* waitForDaemonState(paths.daemonStateFile, timeoutMs);
+      return yield* provideTransport(waitForDaemonState(paths.daemonStateFile, timeoutMs));
     });
 
     const reconcile = (
@@ -116,13 +130,13 @@ export const daemonControlLayer = Layer.effect(
     ): Effect.Effect<void, DaemonControlError> =>
       Effect.gen(function* () {
         const daemon = yield* ensureRunning;
-        yield* postControl(daemon.apiBaseUrl, "/api/control/reconcile", { reason });
+        yield* provideTransport(postControl(daemon.apiBaseUrl, "/api/control/reconcile", { reason }));
       });
 
     const stopWorkspaces = (agentIds: ReadonlyArray<string>) =>
       Effect.gen(function* () {
         const daemon = yield* ensureRunning;
-        yield* postControl(daemon.apiBaseUrl, "/api/control/stop", { agentIds });
+        yield* provideTransport(postControl(daemon.apiBaseUrl, "/api/control/stop", { agentIds }));
       });
 
     const shutdown = Effect.gen(function* () {
@@ -131,12 +145,14 @@ export const daemonControlLayer = Layer.effect(
         return;
       }
 
-      if (!(yield* daemonApiReady(existing.value.apiBaseUrl))) {
+      if (!(yield* provideTransport(daemonApiReady(existing.value.apiBaseUrl)))) {
         yield* store.clearDaemonState;
         return;
       }
 
-      yield* postControl(existing.value.apiBaseUrl, "/api/control/shutdown", { reason: "stop" });
+      yield* provideTransport(
+        postControl(existing.value.apiBaseUrl, "/api/control/shutdown", { reason: "stop" })
+      );
     });
 
     return DaemonControl.of({
@@ -167,7 +183,7 @@ export const daemonServerProgram = Effect.scoped(
     const operatorSlug = yield* hostGit.deriveOperatorSlug(paths.root);
     const syncBranch = syncTargetBranch(config.coordinationRemote, config.trunkBase);
     const shutdown = yield* Deferred.make<void>();
-    const reconcileQueue = yield* Queue.unbounded<ReconcileReason>();
+    const reconcileQueue = yield* Queue.sliding<ReconcileReason>(1);
     const server = yield* makeDaemonServer();
     // Burst follow-up reconciles must outlive one HTTP request, but should still die with the
     // daemon process itself.
@@ -212,6 +228,8 @@ export const daemonServerProgram = Effect.scoped(
         Effect.asVoid
       );
     const requestShutdown = (reason: string) =>
+      // Record the stop event before completing the shutdown gate so the final journal state is
+      // visible to operators even when the process exits immediately afterward.
       eventJournal.append(
         DaemonStopped.make({
           timestamp: isoNow(),
@@ -246,18 +264,32 @@ export const daemonServerProgram = Effect.scoped(
     yield* syncParticipants(eventJournal, store);
 
     // Start background fibers for HTTP serving, periodic polls, and queued reconciles.
-    yield* Effect.forkScoped(server.serve(router));
+    yield* Effect.forkScoped(
+      server.serve(router).pipe(
+        // On this platform, `server.serve(...)` installs the request handlers into the current
+        // scope and then returns immediately. Forking it here still ties that registration to the
+        // daemon lifetime, but joining the fiber would tear the daemon down at startup.
+        Effect.annotateLogs({ service: "daemon-http-server" }),
+        Effect.tapErrorCause((cause) => Effect.logError(cause))
+      )
+    );
     yield* Effect.forkScoped(
       Effect.forever(
         Effect.sleep(`${config.remotePollSeconds} seconds`).pipe(
           Effect.zipRight(Queue.offer(reconcileQueue, "poll"))
         )
-      )
+      ).pipe(Effect.annotateLogs({ service: "daemon-poll-loop" }))
     );
     yield* Effect.forkScoped(
       Effect.forever(
-        Queue.take(reconcileQueue).pipe(Effect.flatMap(globalReconcile))
-      )
+        Queue.take(reconcileQueue).pipe(
+          Effect.flatMap((reason) =>
+            globalReconcile(reason).pipe(
+              Effect.annotateLogs({ reason, service: "daemon-reconcile-loop" })
+            )
+          )
+        )
+      ).pipe(Effect.annotateLogs({ service: "daemon-reconcile-loop" }))
     );
 
     if (process.env.REVIS_DAEMON_READY_STDOUT === "1") {

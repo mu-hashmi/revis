@@ -67,7 +67,7 @@ export const workspaceStoreLayer = Layer.scoped(
     );
     const daemonRef = yield* Ref.make(daemonState);
     const pubsub = yield* Effect.acquireRelease(
-      PubSub.unbounded<WorkspaceStoreChange>(),
+      PubSub.sliding<WorkspaceStoreChange>(64),
       (changes) => PubSub.shutdown(changes)
     );
 

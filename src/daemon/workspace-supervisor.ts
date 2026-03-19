@@ -375,6 +375,12 @@ export function makeWorkspaceSupervisors(
                   onNone: () => Effect.void,
                   onSome: (current) =>
                     reconcileWorkspace(current, signal).pipe(
+                      Effect.annotateLogs({
+                        agentId,
+                        reason: signal.reason,
+                        service: "workspace-supervisor"
+                      }),
+                      Effect.tapErrorCause((cause) => Effect.logError(cause)),
                       Effect.catchAll((error) =>
                         // Persist the failure for operator visibility, then keep the supervisor
                         // alive so later reconcile signals can recover the workspace.
@@ -393,7 +399,7 @@ export function makeWorkspaceSupervisors(
             )
           )
         )
-      );
+      ).pipe(Effect.annotateLogs({ agentId, service: "workspace-supervisor" }));
 
     const ensureSupervisor = (agentId: string) =>
       Effect.gen(function* () {

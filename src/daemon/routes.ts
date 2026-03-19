@@ -105,12 +105,10 @@ function handleGetRequest(options: RouterOptions) {
     // Everything else is served from the packaged dashboard bundle.
     return yield* serveDashboardAsset(options.dashboardRoot, url.pathname);
   }).pipe(
+    Effect.annotateLogs({ method: "GET", service: "daemon-router" }),
+    Effect.tapErrorCause((cause) => Effect.logError(cause)),
     Effect.catchAll((error) =>
-      Effect.succeed(
-        HttpServerResponse.text(`${error instanceof Error ? error.message : String(error)}\n`, {
-          status: 500
-        })
-      )
+      Effect.succeed(serverFailureResponse(error))
     )
   );
 }
@@ -155,7 +153,11 @@ function handlePostRequest(options: RouterOptions) {
     }
 
     return HttpServerResponse.text("Not found\n", { status: 404 });
-  });
+  }).pipe(
+    Effect.annotateLogs({ method: "POST", service: "daemon-router" }),
+    Effect.tapErrorCause((cause) => Effect.logError(cause)),
+    Effect.catchAll((error) => Effect.succeed(serverFailureResponse(error)))
+  );
 }
 
 /** Extract one session id from `/api/sessions/<id>/<suffix>` paths. */
@@ -221,4 +223,11 @@ function readJsonBody<A, I>(schema: Schema.Schema<A, I>) {
     Effect.mapError((error) => ValidationError.make({ message: String(error) })),
     Effect.either
   );
+}
+
+/** Render one plain-text 500 response for unexpected route failures. */
+function serverFailureResponse(error: unknown) {
+  return HttpServerResponse.text(`${error instanceof Error ? error.message : String(error)}\n`, {
+    status: 500
+  });
 }

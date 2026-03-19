@@ -3,6 +3,7 @@
 import { join } from "node:path";
 
 import * as NodeContext from "@effect/platform-node/NodeContext";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -130,5 +131,7 @@ function withHostGit(
 
 /** HostGit depends only on the Node platform services in these contract tests. */
 function makeHostGitLayer() {
-  return hostGitLayer.pipe(Layer.provide(NodeContext.layer));
+  return hostGitLayer.pipe(
+    Layer.provide(Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici))
+  );
 }

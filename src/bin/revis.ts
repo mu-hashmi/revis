@@ -4,6 +4,8 @@
 
 import { Command } from "@effect/cli";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeContext from "@effect/platform-node/NodeContext";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 
@@ -16,6 +18,6 @@ const run = Command.run(app, {
 });
 
 run(process.argv).pipe(
-  Effect.provide(NodeContext.layer),
+  Effect.provide(Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici)),
   NodeRuntime.runMain
 );

@@ -1,6 +1,7 @@
 /** Behavioral contract tests for `EventJournal` against the real filesystem layer. */
 
 import * as NodeContext from "@effect/platform-node/NodeContext";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -206,7 +207,7 @@ function withEventJournal(
 
 /** Compose the real path and journal layers used by the event-journal contract tests. */
 function makeEventJournalLayer(root: string) {
-  const platformLayer = NodeContext.layer;
+  const platformLayer = Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici);
   const pathsLayer = projectPathsLayer(root).pipe(Layer.provide(platformLayer));
   const journalLayer = eventJournalLayer.pipe(
     Layer.provide(Layer.merge(platformLayer, pathsLayer))

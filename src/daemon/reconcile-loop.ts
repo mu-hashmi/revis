@@ -95,6 +95,8 @@ export function makeGlobalReconcile(options: GlobalReconcileOptions) {
 
       yield* options.eventJournal.syncParticipants(snapshots);
     }).pipe(
+      Effect.annotateLogs({ reason, service: "daemon-global-reconcile" }),
+      Effect.tapErrorCause((cause) => Effect.logError(cause)),
       Effect.catchAll((error) =>
         // Persist the latest daemon error for operators, but keep the reconcile loop alive.
         options.store.daemonState.pipe(

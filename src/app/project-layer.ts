@@ -2,6 +2,7 @@
 
 import type * as CommandExecutor from "@effect/platform/CommandExecutor";
 import type * as PlatformFileSystem from "@effect/platform/FileSystem";
+import type * as PlatformHttpClient from "@effect/platform/HttpClient";
 import type * as PlatformPath from "@effect/platform/Path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -47,7 +48,10 @@ export function projectBootstrapLayer(root: string): Layer.Layer<
 export function projectLayer(root: string): Layer.Layer<
   ProjectAppServices,
   unknown,
-  CommandExecutor.CommandExecutor | PlatformFileSystem.FileSystem | PlatformPath.Path
+  | CommandExecutor.CommandExecutor
+  | PlatformFileSystem.FileSystem
+  | PlatformHttpClient.HttpClient
+  | PlatformPath.Path
 > {
   const pathsLayer = projectPathsLayer(root);
   const configLayer = projectConfigLayer.pipe(Layer.provide(pathsLayer));

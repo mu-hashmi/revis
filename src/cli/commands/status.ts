@@ -3,7 +3,6 @@
 import { Command, Options } from "@effect/cli";
 import * as Effect from "effect/Effect";
 
-import type { ProjectAppServices } from "../../app/project-layer";
 import { DaemonControl } from "../../daemon/control";
 import { StatusSnapshot } from "../../domain/models";
 import { loadStatusSnapshot } from "../../workflows/load-status";
@@ -42,9 +41,14 @@ export function makeStatusCommand(io: CliWriters) {
 
   return Command.make("status", { watch }, ({ watch }) =>
     reportErrors(
-      withProject(
-        (): Effect.Effect<void, unknown, ProjectAppServices> =>
-          watch ? watchStatus() : renderStatus()
+      withProject(() =>
+        Effect.gen(function* () {
+          if (watch) {
+            return yield* watchStatus();
+          }
+
+          yield* renderStatus();
+        })
       ),
       writeErr
     )

@@ -3,6 +3,7 @@
 import { TextDecoder } from "node:util";
 
 import * as NodeContext from "@effect/platform-node/NodeContext";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -79,7 +80,9 @@ describe("daemon HTTP transport", () => {
 
           expect(invalid.status).toBe(400);
           expect(text).toContain("reason");
-        }).pipe(Effect.provide(Layer.merge(NodeContext.layer, harness.layer)))
+        }).pipe(
+          Effect.provide(Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici, harness.layer))
+        )
       )
     )
   );
@@ -149,7 +152,9 @@ describe("daemon HTTP transport", () => {
           expect(events).toStrictEqual([backlog, live]);
 
           yield* Effect.tryPromise(() => reader.cancel()).pipe(Effect.orDie);
-        }).pipe(Effect.provide(Layer.merge(NodeContext.layer, harness.layer)))
+        }).pipe(
+          Effect.provide(Layer.mergeAll(NodeContext.layer, NodeHttpClient.layerUndici, harness.layer))
+        )
       )
     )
   );

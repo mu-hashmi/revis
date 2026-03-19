@@ -1,8 +1,8 @@
 /** Local detached-process workspace provider. */
 
 import { spawn } from "node:child_process";
-import { access, open, readFile, rm, writeFile } from "node:fs/promises";
 
+import { FileSystem } from "@effect/platform";
 import * as CommandExecutor from "@effect/platform/CommandExecutor";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -26,9 +26,7 @@ import {
 import {
   processAlive,
   runCommandWith,
-  shellJoin,
-  sleep,
-  type CommandFailure
+  shellJoin
 } from "../platform/process";
 import { ProjectPaths } from "../services/project-paths";
 import { HostGit } from "../git/host-git";
@@ -48,6 +46,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
   WorkspaceProvider,
   Effect.gen(function* () {
     const executor = yield* CommandExecutor.CommandExecutor;
+    const fs = yield* FileSystem.FileSystem;
     const hostGit = yield* HostGit;
     const paths = yield* ProjectPaths;
 
@@ -61,10 +60,9 @@ export const localWorkspaceProviderLayer = Layer.effect(
 
       // Re-provisioning should start from a clean runtime directory so stale logs, exit files, or
       // detached process artifacts never bleed into the new workspace.
-      yield* Effect.tryPromise({
-        try: () => rm(workspaceDir, { recursive: true, force: true }),
-        catch: (error) => workspaceProvisionError("local", String(error))
-      });
+      yield* fs.remove(workspaceDir, { recursive: true, force: true }).pipe(
+        Effect.mapError((error) => workspaceProvisionError("local", error.message))
+      );
 
       // Clone from the coordination remote first, then switch to the workspace branch and stamp a
       // distinct identity so later commits are attributable to this specific agent workspace.
@@ -85,10 +83,9 @@ export const localWorkspaceProviderLayer = Layer.effect(
         `${params.operatorSlug}-${params.agentId}`,
         workspaceEmail(params.operatorSlug, params.agentId)
       );
-      yield* Effect.tryPromise({
-        try: () => writeFile(logPath, "", "utf8"),
-        catch: (error) => workspaceProvisionError("local", String(error))
-      });
+      yield* fs.writeFileString(logPath, "").pipe(
+        Effect.mapError((error) => workspaceProvisionError("local", error.message))
+      );
 
       return {
         workspaceRoot: repoPath,
@@ -108,28 +105,24 @@ export const localWorkspaceProviderLayer = Layer.effect(
       const shell = process.env.SHELL ?? "/bin/sh";
 
       // Reset the runtime files that the daemon uses to inspect detached process state.
-      yield* resetLocalIterationFiles(logPath, exitPath);
+      yield* resetLocalIterationFiles(fs, logPath, exitPath);
 
-      return yield* Effect.acquireUseRelease(
-        Effect.tryPromise({
-          try: () => open(logPath, "a"),
-          catch: (error) => workspaceStartError("local", String(error))
-        }),
-        (logHandle) =>
-          spawnDetachedIteration(
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          // Keep the append handle scoped to startup so Node owns one stable fd for the detached
+          // child, but the parent still closes its copy immediately after spawn succeeds.
+          const logFile = yield* fs.open(logPath, { flag: "a" }).pipe(
+            Effect.mapError((error) => workspaceStartError("local", error.message))
+          );
+
+          return yield* spawnDetachedIteration(
             snapshot,
             shell,
             exitPath,
             workspaceIteration(snapshot) + 1,
-            logHandle.fd
-          ),
-        (logHandle) =>
-          Effect.tryPromise({
-            try: () => logHandle.close(),
-            catch: (error) => workspaceStartError("local", String(error))
-          })
-            // Closing the already-open log handle is cleanup, not a recoverable start failure.
-            .pipe(Effect.orDie)
+            Number(logFile.fd)
+          );
+        })
       );
     });
 
@@ -152,7 +145,7 @@ export const localWorkspaceProviderLayer = Layer.effect(
       // Trust the persisted exit file before probing the pid. The child can exit and be reaped
       // before `kill(pid, 0)` becomes authoritative, but the wrapper still leaves behind the final
       // session status that the daemon needs.
-      const exitCode = yield* readLocalExitCode(exitPath);
+      const exitCode = yield* readLocalExitCode(fs, exitPath);
       if (exitCode !== null) {
         return Number.isFinite(exitCode)
           ? ({ phase: "exited", exitCode } satisfies WorkspaceSessionStatus)
@@ -171,16 +164,19 @@ export const localWorkspaceProviderLayer = Layer.effect(
       snapshot: WorkspaceSnapshot
     ) {
       const logPath = paths.workspaceLogFile(snapshot.agentId);
-      if (!(yield* pathExists(logPath, (error) => workspaceActivityError("local", String(error))))) {
+      if (
+        !(yield* pathExists(fs, logPath, (error) =>
+          workspaceActivityError("local", error.message)
+        ))
+      ) {
         return [];
       }
 
       // Activity is just the bounded tail of the persisted session log; the daemon can call this
       // repeatedly without worrying about growing unbounded output in memory.
-      const payload = yield* Effect.tryPromise({
-        try: () => readFile(logPath, "utf8"),
-        catch: (error) => workspaceActivityError("local", String(error))
-      });
+      const payload = yield* fs.readFileString(logPath).pipe(
+        Effect.mapError((error) => workspaceActivityError("local", error.message))
+      );
 
       return payload
         .replaceAll("\r", "")
@@ -228,10 +224,10 @@ export const localWorkspaceProviderLayer = Layer.effect(
         Effect.catchTag("WorkspaceInterruptError", () => Effect.void)
       );
 
-      yield* Effect.tryPromise({
-        try: () => rm(paths.workspaceRuntimeDir(snapshot.agentId), { recursive: true, force: true }),
-        catch: (error) => workspaceDestroyError("local", String(error))
-      });
+      yield* fs.remove(paths.workspaceRuntimeDir(snapshot.agentId), {
+        recursive: true,
+        force: true
+      }).pipe(Effect.mapError((error) => workspaceDestroyError("local", error.message)));
     });
 
     const service: WorkspaceProviderApi = {
@@ -251,32 +247,30 @@ export const localWorkspaceProviderLayer = Layer.effect(
 
 /** Return whether one file exists on disk. */
 function pathExists<E>(
+  fs: FileSystem.FileSystem,
   path: string,
-  onError: (error: unknown) => E
+  onError: (error: { readonly message: string }) => E
 ): Effect.Effect<boolean, E> {
-  return Effect.tryPromise({
-    try: async () => {
-      try {
-        await access(path);
-        return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          return false;
-        }
-
-        throw error;
-      }
-    },
-    catch: onError
-  });
+  return fs.exists(path).pipe(Effect.mapError(onError));
 }
 
 /** Reset the log and exit files that describe one detached local iteration. */
-function resetLocalIterationFiles(logPath: string, exitPath: string) {
-  return Effect.tryPromise({
-    try: () => Promise.all([writeFile(logPath, "", "utf8"), rm(exitPath, { force: true })]),
-    catch: (error) => workspaceStartError("local", String(error))
-  });
+function resetLocalIterationFiles(
+  fs: FileSystem.FileSystem,
+  logPath: string,
+  exitPath: string
+) {
+  return Effect.all(
+    [
+      fs.writeFileString(logPath, "").pipe(
+        Effect.mapError((error) => workspaceStartError("local", error.message))
+      ),
+      fs.remove(exitPath, { force: true }).pipe(
+        Effect.mapError((error) => workspaceStartError("local", error.message))
+      )
+    ],
+    { concurrency: "unbounded" }
+  ).pipe(Effect.asVoid);
 }
 
 /** Spawn one detached shell iteration and return its pid-backed session id. */
@@ -322,19 +316,18 @@ function spawnDetachedIteration(
 }
 
 /** Read the persisted local exit code when the wrapper already wrote one. */
-function readLocalExitCode(exitPath: string) {
+function readLocalExitCode(fs: FileSystem.FileSystem, exitPath: string) {
   return Effect.gen(function* () {
-    const exitFileExists = yield* pathExists(exitPath, (error) =>
-      workspaceInspectError("local", String(error))
+    const exitFileExists = yield* pathExists(fs, exitPath, (error) =>
+      workspaceInspectError("local", error.message)
     );
     if (!exitFileExists) {
       return null;
     }
 
-    const payload = yield* Effect.tryPromise({
-      try: () => readFile(exitPath, "utf8"),
-      catch: (error) => workspaceInspectError("local", String(error))
-    });
+    const payload = yield* fs.readFileString(exitPath).pipe(
+      Effect.mapError((error) => workspaceInspectError("local", error.message))
+    );
 
     return Number.parseInt(payload.trim(), 10);
   });
@@ -377,12 +370,23 @@ function stopLocalProcess(pid: number) {
       catch: (error) => workspaceInterruptError("local", String(error))
     });
 
-    // Poll for a short window before escalating. Detached children are host-level processes, so a
-    // small real-time wait is sufficient here and keeps teardown deterministic.
-    const deadline = Date.now() + PROCESS_STOP_TIMEOUT_MS;
-    while (processAlive(pid) && Date.now() < deadline) {
-      yield* Effect.promise(() => sleep(50));
-    }
+    // Poll for a short window before escalating so detached children have a chance to flush logs
+    // and run their shell traps before the provider falls back to SIGKILL.
+    yield* Effect.gen(function* () {
+      // Return `true` while we are still waiting so `Effect.repeat` keeps polling, then `false`
+      // once the process is gone so the repeat loop stops immediately.
+      if (!processAlive(pid)) {
+        return false;
+      }
+
+      yield* Effect.sleep("50 millis");
+      return true;
+    }).pipe(
+      Effect.repeat({
+        until: (waiting) => waiting === false
+      }),
+      Effect.timeoutOption(`${PROCESS_STOP_TIMEOUT_MS} millis`)
+    );
 
     if (processAlive(pid)) {
       yield* Effect.try({
