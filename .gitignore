@@ -3,7 +3,6 @@ dist/
 build/
 node_modules/
 .reference/
-.zed/
 
 # Revis runtime state stays local because it only drives monitor/status views.
 .revis/runtime/

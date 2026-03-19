@@ -1,8 +1,12 @@
 # Instructions for coding agents working on this codebase
 
+## Project Snapshot
+
 Revis is a coordination CLI for sandboxed coding agent workspaces. See README.md for more details.
 
-## Rules
+This repository is a VERY EARLY WIP. Proposing sweeping changes that improve long-term maintainability is encouraged. For all intents and purposes, the current state of the codebase is merely a snapshot of a product that is being heavily iterated on. **Nothing** should be treated as "finalized" unless explicitly stated.
+
+## MANDATORY Rules
 
 - NEVER change wording in README.md unless explicitly requested. You may only update the installation/usage/requirements if those change. If the product/functionality/behavior ever changes such that the README (or any docs) are now obsolete, surface this immediately. 
 
@@ -13,15 +17,16 @@ Revis is a coordination CLI for sandboxed coding agent workspaces. See README.md
 1. Read `https://effect.website/llms.txt` to find the relevant official docs pages for the API or pattern you need
 2. Use the linked `effect.website` docs as the primary documentation source
 3. Search `.reference/effect/` for real implementations and exact API behavior; the Effect repo is already cloned locally for reference (if it isn't, clone it there: https://github.com/Effect-TS/effect)
-4. When the docs are ambiguous, verify the current installed API against `node_modules/effect/` before changing code
+4. When the Effect docs are ambiguous, verify the current installed API against `node_modules/effect/` before changing code
 
 Never guess at Effect patterns - check the official docs and local source first.
 
-## Conventions
+## Code Conventions (IMPORTANT)
 
 - Use JSDoc-style module/function comments on public functions and on non-trivial internal helpers.
 - Add blank lines between logical phases inside functions.
 - ALWAYS do loud failures over silent fallbacks. If state is corrupted, surface it.
+- Duplicate logic across multiple files is a code smell and should be avoided. Don't be afraid to change existing code. Don't take shortcuts by just adding local logic to solve a problem.
 
 ## Validation
 
